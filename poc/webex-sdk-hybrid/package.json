@@ -1,0 +1,27 @@
+{
+  "name": "webex-sdk-hybrid-poc",
+  "version": "0.1.0",
+  "description": "POC: Webex Browser SDK controlled via Playwright for meeting join + audio capture",
+  "main": "test-hybrid.js",
+  "scripts": {
+    "test": "node test-hybrid.js",
+    "install-browsers": "npx playwright install chromium"
+  },
+  "keywords": [
+    "webex",
+    "meetings",
+    "sdk",
+    "playwright",
+    "audio",
+    "capture",
+    "poc"
+  ],
+  "author": "tech-grandpa",
+  "license": "MIT",
+  "dependencies": {
+    "playwright": "^1.40.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
