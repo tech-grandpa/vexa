@@ -1,0 +1,722 @@
+import 'jsdom-global/register';
+import * as InternalMediaCoreModule from '@webex/internal-media-core';
+import Media from '@webex/plugin-meetings/src/media/index';
+import {assert} from '@webex/test-helper-chai';
+import sinon from 'sinon';
+import StaticConfig from '@webex/plugin-meetings/src/common/config';
+import {BrowserInfo} from '@webex/web-capabilities';
+
+describe('createMediaConnection', () => {
+  let clock;
+  beforeEach(() => {
+    clock = sinon.useFakeTimers();
+  });
+
+  const fakeRoapMediaConnection = {
+    id: 'roap media connection',
+  };
+  const fakeTrack = {
+    id: 'any fake track',
+  };
+  const fakeAudioStream = {
+    outputStream: {
+      getTracks: () => {
+        return [fakeTrack];
+      },
+    },
+  };
+  const fakeVideoStream = {
+    outputStream: {
+      getTracks: () => {
+        return [fakeTrack];
+      },
+    },
+  };
+  const fakeShareVideoStream = {
+    outputStream: {
+      getTracks: () => {
+        return [fakeTrack];
+      },
+    },
+  };
+  const fakeShareAudioStream = {
+    outputStream: {
+      getTracks: () => {
+        return [fakeTrack];
+      },
+    },
+  };
+  afterEach(() => {
+    sinon.restore();
+    clock.uninstall();
+  });
+
+  it('creates a RoapMediaConnection when multistream is disabled', () => {
+    const roapMediaConnectionConstructorStub = sinon
+      .stub(InternalMediaCoreModule, 'RoapMediaConnection')
+      .returns(fakeRoapMediaConnection);
+
+    StaticConfig.set({bandwidth: {audio: 123, video: 456, startBitrate: 999}});
+
+    const ENABLE_EXTMAP = false;
+    const ENABLE_RTX = true;
+
+    Media.createMediaConnection(false, 'some debug id', 'meetingId', {
+      mediaProperties: {
+        mediaDirection: {
+          sendAudio: false,
+          sendVideo: true,
+          sendShare: false,
+          receiveAudio: false,
+          receiveVideo: true,
+          receiveShare: true,
+        },
+        audioStream: fakeAudioStream,
+        videoStream: fakeVideoStream,
+        shareVideoTrack: null,
+        shareAudioTrack: null,
+      },
+      remoteQualityLevel: 'HIGH',
+      enableRtx: ENABLE_RTX,
+      enableExtmap: ENABLE_EXTMAP,
+      turnServerInfo: {
+        urls: [
+          'turns:turn-server-url-1:443?transport=tcp',
+          'turns:turn-server-url-2:443?transport=tcp',
+        ],
+        username: 'turn username',
+        password: 'turn password',
+      },
+      iceCandidatesTimeout: undefined,
+    });
+    assert.calledOnce(roapMediaConnectionConstructorStub);
+    assert.calledWith(
+      roapMediaConnectionConstructorStub,
+      {
+        iceServers: [
+          {
+            urls: [
+              'turns:turn-server-url-1:443?transport=tcp',
+              'turns:turn-server-url-2:443?transport=tcp',
+            ],
+            username: 'turn username',
+            credential: 'turn password',
+          },
+        ],
+        iceCandidatesTimeout: undefined,
+        skipInactiveTransceivers: false,
+        requireH264: true,
+        sdpMunging: {
+          convertPort9to0: false,
+          addContentSlides: true,
+          bandwidthLimits: {
+            audio: 123,
+            video: 456,
+          },
+          startBitrate: 999,
+          periodicKeyframes: 20,
+          disableExtmap: !ENABLE_EXTMAP,
+          disableRtx: !ENABLE_RTX,
+        },
+      },
+      {
+        localTracks: {
+          audio: fakeTrack,
+          video: fakeTrack,
+          screenShareVideo: undefined,
+          screenShareAudio: undefined,
+        },
+        direction: {
+          audio: 'inactive',
+          video: 'sendrecv',
+          screenShareVideo: 'recvonly',
+        },
+        remoteQualityLevel: 'HIGH',
+      },
+      'some debug id'
+    );
+  });
+
+  it('should set direction to sendonly for both audio and video when only send flags are true', () => {
+    const roapMediaConnectionConstructorStub = sinon
+      .stub(InternalMediaCoreModule, 'RoapMediaConnection')
+      .returns(fakeRoapMediaConnection);
+
+    StaticConfig.set({bandwidth: {audio: 123, video: 456, startBitrate: 999}});
+
+    const ENABLE_EXTMAP = false;
+    const ENABLE_RTX = true;
+
+    Media.createMediaConnection(false, 'sendonly-debug-id', 'meetingId', {
+      mediaProperties: {
+        mediaDirection: {
+          sendAudio: true,
+          receiveAudio: false,
+          sendVideo: true,
+          receiveVideo: false,
+          sendShare: false,
+          receiveShare: false,
+        },
+        audioStream: fakeAudioStream,
+        videoStream: fakeVideoStream,
+        shareVideoTrack: null,
+        shareAudioTrack: null,
+      },
+      remoteQualityLevel: 'HIGH',
+      enableRtx: ENABLE_RTX,
+      enableExtmap: ENABLE_EXTMAP,
+      turnServerInfo: undefined,
+      iceCandidatesTimeout: undefined,
+    });
+
+    assert.calledWith(
+      roapMediaConnectionConstructorStub,
+      sinon.match.any,
+      {
+        localTracks: {
+          audio: fakeTrack,
+          video: fakeTrack,
+          screenShareVideo: undefined,
+          screenShareAudio: undefined,
+        },
+        direction: {
+          audio: 'sendonly',
+          video: 'sendonly',
+          screenShareVideo: 'inactive',
+        },
+        remoteQualityLevel: 'HIGH',
+      },
+      'sendonly-debug-id'
+    );
+  });
+
+  it('should set direction to recvonly for both audio and video when only receive flags are true', () => {
+    const roapMediaConnectionConstructorStub = sinon
+      .stub(InternalMediaCoreModule, 'RoapMediaConnection')
+      .returns(fakeRoapMediaConnection);
+
+    StaticConfig.set({bandwidth: {audio: 123, video: 456, startBitrate: 999}});
+
+    const ENABLE_EXTMAP = true;
+    const ENABLE_RTX = false;
+
+    Media.createMediaConnection(false, 'recvonly-debug-id', 'meetingId', {
+      mediaProperties: {
+        mediaDirection: {
+          sendAudio: false,
+          receiveAudio: true,
+          sendVideo: false,
+          receiveVideo: true,
+          sendShare: false,
+          receiveShare: false,
+        },
+        audioStream: fakeAudioStream,
+        videoStream: fakeVideoStream,
+        shareVideoTrack: null,
+        shareAudioTrack: null,
+      },
+      remoteQualityLevel: 'HIGH',
+      enableRtx: ENABLE_RTX,
+      enableExtmap: ENABLE_EXTMAP,
+      turnServerInfo: undefined,
+      iceCandidatesTimeout: undefined,
+    });
+
+    assert.calledWith(
+      roapMediaConnectionConstructorStub,
+      sinon.match.any,
+      {
+        localTracks: {
+          audio: fakeTrack,
+          video: fakeTrack,
+          screenShareVideo: undefined,
+          screenShareAudio: undefined,
+        },
+        direction: {
+          audio: 'recvonly',
+          video: 'recvonly',
+          screenShareVideo: 'inactive',
+        },
+        remoteQualityLevel: 'HIGH',
+      },
+      'recvonly-debug-id'
+    );
+  });
+
+  it('creates a MultistreamRoapMediaConnection when multistream is enabled', () => {
+    const multistreamRoapMediaConnectionConstructorStub = sinon
+      .stub(InternalMediaCoreModule, 'MultistreamRoapMediaConnection')
+      .returns(fakeRoapMediaConnection);
+
+    const rtcMetrics = {
+      addMetrics: sinon.stub(),
+      closeMetrics: sinon.stub(),
+      sendMetricsInQueue: sinon.stub(),
+    };
+
+    Media.createMediaConnection(true, 'some debug id', 'meeting id', {
+      mediaProperties: {
+        mediaDirection: {
+          sendAudio: true,
+          sendVideo: true,
+          sendShare: false,
+          receiveAudio: true,
+          receiveVideo: true,
+          receiveShare: true,
+        },
+      },
+      rtcMetrics,
+      turnServerInfo: {
+        urls: [
+          'turns:turn-server-url-1:443?transport=tcp',
+          'turns:turn-server-url-2:443?transport=tcp',
+        ],
+        username: 'turn username',
+        password: 'turn password',
+      },
+      bundlePolicy: 'max-bundle',
+      disableAudioMainDtx: false,
+      enableAudioTwcc: true,
+    });
+    assert.calledOnce(multistreamRoapMediaConnectionConstructorStub);
+    assert.calledWith(
+      multistreamRoapMediaConnectionConstructorStub,
+      {
+        iceServers: [
+          {
+            urls: [
+              'turns:turn-server-url-1:443?transport=tcp',
+              'turns:turn-server-url-2:443?transport=tcp',
+            ],
+            username: 'turn username',
+            credential: 'turn password',
+          },
+        ],
+        bundlePolicy: 'max-bundle',
+        disableAudioMainDtx: false,
+        disableAudioTwcc: false,
+      },
+      'meeting id'
+    );
+
+    // check if rtcMetrics callbacks are configured correctly
+    const addMetricsCallback = multistreamRoapMediaConnectionConstructorStub.getCalls()[0].args[2];
+    const closeMetricsCallback =
+      multistreamRoapMediaConnectionConstructorStub.getCalls()[0].args[3];
+    const sendMetricsInQueueCallback =
+      multistreamRoapMediaConnectionConstructorStub.getCalls()[0].args[4];
+
+    assert.isFunction(addMetricsCallback);
+    assert.isFunction(closeMetricsCallback);
+    assert.isFunction(sendMetricsInQueueCallback);
+
+    const fakeMetricsData = {id: 'metrics data'};
+
+    addMetricsCallback(fakeMetricsData);
+    assert.calledOnceWithExactly(rtcMetrics.addMetrics, fakeMetricsData);
+
+    closeMetricsCallback();
+    assert.calledOnce(rtcMetrics.closeMetrics);
+
+    sendMetricsInQueueCallback();
+    assert.calledOnce(rtcMetrics.sendMetricsInQueue);
+  });
+
+  it('multistream non-firefox does not care about stopIceGatheringAfterFirstRelayCandidate', () => {
+    const multistreamRoapMediaConnectionConstructorStub = sinon
+      .stub(InternalMediaCoreModule, 'MultistreamRoapMediaConnection')
+      .returns(fakeRoapMediaConnection);
+
+    Media.createMediaConnection(true, 'some debug id', 'meeting id', {
+      stopIceGatheringAfterFirstRelayCandidate: true,
+    });
+    assert.calledOnce(multistreamRoapMediaConnectionConstructorStub);
+    assert.calledWith(
+      multistreamRoapMediaConnectionConstructorStub,
+      {
+        iceServers: [],
+        disableAudioTwcc: true,
+      },
+      'meeting id'
+    );
+  });
+
+  it('multistream firefox stops gathering after first relay if stopIceGatheringAfterFirstRelayCandidate is true', () => {
+    const multistreamRoapMediaConnectionConstructorStub = sinon
+      .stub(InternalMediaCoreModule, 'MultistreamRoapMediaConnection')
+      .returns(fakeRoapMediaConnection);
+
+    sinon.stub(BrowserInfo, 'isFirefox').returns(true);
+
+    Media.createMediaConnection(true, 'some debug id', 'meeting id', {
+      stopIceGatheringAfterFirstRelayCandidate: true,
+    });
+    assert.calledOnce(multistreamRoapMediaConnectionConstructorStub);
+    assert.calledWith(
+      multistreamRoapMediaConnectionConstructorStub,
+      {
+        iceServers: [],
+        doFullIce: true,
+        stopIceGatheringAfterFirstRelayCandidate: true,
+        disableAudioTwcc: true,
+      },
+      'meeting id'
+    );
+  });
+
+  it('multistream firefox continues gathering if stopIceGatheringAfterFirstRelayCandidate is false', () => {
+    const multistreamRoapMediaConnectionConstructorStub = sinon
+      .stub(InternalMediaCoreModule, 'MultistreamRoapMediaConnection')
+      .returns(fakeRoapMediaConnection);
+
+    sinon.stub(BrowserInfo, 'isFirefox').returns(true);
+
+    Media.createMediaConnection(true, 'some debug id', 'meeting id', {
+      stopIceGatheringAfterFirstRelayCandidate: false,
+    });
+    assert.calledOnce(multistreamRoapMediaConnectionConstructorStub);
+    assert.calledWith(
+      multistreamRoapMediaConnectionConstructorStub,
+      {
+        iceServers: [],
+        doFullIce: true,
+        stopIceGatheringAfterFirstRelayCandidate: false,
+        disableAudioTwcc: true,
+      },
+      'meeting id'
+    );
+  });
+
+  [
+    {testCase: 'turnServerInfo is undefined', turnServerInfo: undefined},
+    {
+      testCase: 'turnServerInfo.url is empty string',
+      turnServerInfo: {urls: [], username: 'turn username', password: 'turn password'},
+    },
+  ].forEach(({testCase, turnServerInfo}) => {
+    it(`passes empty ICE servers array to MultistreamRoapMediaConnection if ${testCase} (multistream enabled)`, () => {
+      const multistreamRoapMediaConnectionConstructorStub = sinon
+        .stub(InternalMediaCoreModule, 'MultistreamRoapMediaConnection')
+        .returns(fakeRoapMediaConnection);
+
+      Media.createMediaConnection(true, 'debug string', 'meeting id', {
+        mediaProperties: {
+          mediaDirection: {
+            sendAudio: true,
+            sendVideo: true,
+            sendShare: false,
+            receiveAudio: true,
+            receiveVideo: true,
+            receiveShare: true,
+          },
+        },
+        turnServerInfo,
+      });
+      assert.calledOnce(multistreamRoapMediaConnectionConstructorStub);
+      assert.calledWith(
+        multistreamRoapMediaConnectionConstructorStub,
+        {
+          iceServers: [],
+          disableAudioTwcc: true,
+        },
+        'meeting id'
+      );
+    });
+  });
+
+  it('does not pass bundlePolicy to MultistreamRoapMediaConnection if bundlePolicy is undefined', () => {
+    const multistreamRoapMediaConnectionConstructorStub = sinon
+      .stub(InternalMediaCoreModule, 'MultistreamRoapMediaConnection')
+      .returns(fakeRoapMediaConnection);
+
+    Media.createMediaConnection(true, 'debug string', 'meeting id', {
+      mediaProperties: {
+        mediaDirection: {
+          sendAudio: true,
+          sendVideo: true,
+          sendShare: false,
+          receiveAudio: true,
+          receiveVideo: true,
+          receiveShare: true,
+        },
+      },
+      bundlePolicy: undefined,
+    });
+    assert.calledOnce(multistreamRoapMediaConnectionConstructorStub);
+    assert.calledWith(
+      multistreamRoapMediaConnectionConstructorStub,
+      {
+        iceServers: [],
+        disableAudioTwcc: true,
+      },
+      'meeting id'
+    );
+  });
+
+  it('does not pass disableAudioMainDtx to MultistreamRoapMediaConnection if disableAudioMainDtx is undefined', () => {
+    const multistreamRoapMediaConnectionConstructorStub = sinon
+      .stub(InternalMediaCoreModule, 'MultistreamRoapMediaConnection')
+      .returns(fakeRoapMediaConnection);
+
+    Media.createMediaConnection(true, 'debug string', 'meeting id', {
+      mediaProperties: {
+        mediaDirection: {
+          sendAudio: true,
+          sendVideo: true,
+          sendShare: false,
+          receiveAudio: true,
+          receiveVideo: true,
+          receiveShare: true,
+        },
+      },
+      disableAudioMainDtx: undefined,
+    });
+    assert.calledOnce(multistreamRoapMediaConnectionConstructorStub);
+    assert.calledWith(
+      multistreamRoapMediaConnectionConstructorStub,
+      {
+        iceServers: [],
+        disableAudioTwcc: true,
+      },
+      'meeting id'
+    );
+  });
+
+  it('MultistreamRoapMediaConnection disable audio twcc by default', () => {
+    const multistreamRoapMediaConnectionConstructorStub = sinon
+      .stub(InternalMediaCoreModule, 'MultistreamRoapMediaConnection')
+      .returns(fakeRoapMediaConnection);
+
+    Media.createMediaConnection(true, 'debug string', 'meeting id', {
+      mediaProperties: {
+        mediaDirection: {
+          sendAudio: true,
+          sendVideo: true,
+          sendShare: false,
+          receiveAudio: true,
+          receiveVideo: true,
+          receiveShare: true,
+        },
+      },
+    });
+    assert.calledOnce(multistreamRoapMediaConnectionConstructorStub);
+    assert.calledWith(
+      multistreamRoapMediaConnectionConstructorStub,
+      {
+        iceServers: [],
+        disableAudioTwcc: true,
+      },
+      'meeting id'
+    );
+  });
+
+  const testEnableInboundAudioLevelMonitoring = (
+    testName: string,
+    browserStubs: {isChrome?: boolean; isEdge?: boolean; isFirefox?: boolean},
+    isMultistream: boolean,
+    expectedConfig: object,
+    additionalOptions = {}
+  ) => {
+    it(testName, () => {
+      const connectionConstructorStub = isMultistream
+        ? sinon.stub(InternalMediaCoreModule, 'MultistreamRoapMediaConnection')
+        : sinon.stub(InternalMediaCoreModule, 'RoapMediaConnection');
+
+      connectionConstructorStub.returns(fakeRoapMediaConnection);
+
+      // Set up browser stubs
+      sinon.stub(BrowserInfo, 'isChrome').returns(browserStubs.isChrome || false);
+      sinon.stub(BrowserInfo, 'isEdge').returns(browserStubs.isEdge || false);
+      sinon.stub(BrowserInfo, 'isFirefox').returns(browserStubs.isFirefox || false);
+
+      const baseOptions = {
+        mediaProperties: {
+          mediaDirection: {
+            sendAudio: true,
+            sendVideo: true,
+            sendShare: false,
+            receiveAudio: true,
+            receiveVideo: true,
+            receiveShare: true,
+          },
+          ...(isMultistream
+            ? {}
+            : {
+                audioStream: fakeAudioStream,
+                videoStream: fakeVideoStream,
+                shareVideoTrack: null,
+                shareAudioTrack: null,
+              }),
+        },
+        ...(isMultistream
+          ? {}
+          : {
+              remoteQualityLevel: 'HIGH',
+              enableRtx: true,
+              enableExtmap: true,
+            }),
+        ...additionalOptions,
+      };
+
+      if (!isMultistream) {
+        StaticConfig.set({bandwidth: {audio: 123, video: 456, startBitrate: 999}});
+      }
+
+      Media.createMediaConnection(isMultistream, 'debug string', 'meeting id', baseOptions);
+
+      if (isMultistream) {
+        assert.calledOnceWithExactly(
+          connectionConstructorStub,
+          expectedConfig,
+          'meeting id',
+          sinon.match.func,
+          sinon.match.func,
+          sinon.match.func
+        );
+      } else {
+        assert.calledOnceWithExactly(
+          connectionConstructorStub,
+          expectedConfig,
+          sinon.match.object,
+          'debug string'
+        );
+      }
+    });
+  };
+
+  testEnableInboundAudioLevelMonitoring(
+    'enables enableInboundAudioLevelMonitoring for multistream when browser is Chrome',
+    {isChrome: true},
+    true,
+    {
+      iceServers: [],
+      disableAudioTwcc: true,
+      enableInboundAudioLevelMonitoring: true,
+    }
+  );
+
+  testEnableInboundAudioLevelMonitoring(
+    'enables enableInboundAudioLevelMonitoring for multistream when browser is Edge',
+    {isEdge: true},
+    true,
+    {
+      iceServers: [],
+      disableAudioTwcc: true,
+      enableInboundAudioLevelMonitoring: true,
+    }
+  );
+
+  testEnableInboundAudioLevelMonitoring(
+    'does not enable enableInboundAudioLevelMonitoring for multistream when browser is Firefox',
+    {isFirefox: true},
+    true,
+    {
+      iceServers: [],
+      disableAudioTwcc: true,
+      doFullIce: true,
+      stopIceGatheringAfterFirstRelayCandidate: undefined,
+    }
+  );
+
+  testEnableInboundAudioLevelMonitoring(
+    'does not enable enableInboundAudioLevelMonitoring for non-multistream connections even when browser is Chrome',
+    {isChrome: true},
+    false,
+    {
+      iceServers: [],
+      iceCandidatesTimeout: undefined,
+      skipInactiveTransceivers: false,
+      requireH264: true,
+      sdpMunging: {
+        convertPort9to0: false,
+        addContentSlides: true,
+        bandwidthLimits: {
+          audio: 123,
+          video: 456,
+        },
+        startBitrate: 999,
+        periodicKeyframes: 20,
+        disableExtmap: false,
+        disableRtx: false,
+      },
+    }
+  );
+
+  [
+    {testCase: 'turnServerInfo is undefined', turnServerInfo: undefined},
+    {
+      testCase: 'turnServerInfo.url is empty string',
+      turnServerInfo: {urls: [], username: 'turn username', password: 'turn password'},
+    },
+  ].forEach(({testCase, turnServerInfo}) => {
+    it(`passes empty ICE servers array to RoapMediaConnection if ${testCase} (multistream disabled)`, () => {
+      const roapMediaConnectionConstructorStub = sinon
+        .stub(InternalMediaCoreModule, 'RoapMediaConnection')
+        .returns(fakeRoapMediaConnection);
+
+      StaticConfig.set({bandwidth: {audio: 123, video: 456, startBitrate: 999}});
+
+      const ENABLE_EXTMAP = false;
+      const ENABLE_RTX = true;
+
+      Media.createMediaConnection(false, 'some debug id', 'meeting id', {
+        mediaProperties: {
+          mediaDirection: {
+            sendAudio: true,
+            sendVideo: true,
+            sendShare: true,
+            receiveAudio: true,
+            receiveVideo: true,
+            receiveShare: true,
+          },
+          audioStream: fakeAudioStream,
+          videoStream: null,
+          shareVideoStream: fakeShareVideoStream,
+          shareAudioStream: fakeShareAudioStream,
+        },
+        remoteQualityLevel: 'HIGH',
+        enableRtx: ENABLE_RTX,
+        enableExtmap: ENABLE_EXTMAP,
+        turnServerInfo,
+        iceCandidatesTimeout: undefined,
+      });
+      assert.calledOnce(roapMediaConnectionConstructorStub);
+      assert.calledWith(
+        roapMediaConnectionConstructorStub,
+        {
+          iceServers: [],
+          iceCandidatesTimeout: undefined,
+          skipInactiveTransceivers: false,
+          requireH264: true,
+          sdpMunging: {
+            convertPort9to0: false,
+            addContentSlides: true,
+            bandwidthLimits: {
+              audio: 123,
+              video: 456,
+            },
+            startBitrate: 999,
+            periodicKeyframes: 20,
+            disableExtmap: !ENABLE_EXTMAP,
+            disableRtx: !ENABLE_RTX,
+          },
+        },
+        {
+          localTracks: {
+            audio: fakeTrack,
+            video: undefined,
+            screenShareVideo: fakeTrack,
+            screenShareAudio: fakeTrack,
+          },
+          direction: {
+            audio: 'sendrecv',
+            video: 'sendrecv',
+            screenShareVideo: 'sendrecv',
+          },
+          remoteQualityLevel: 'HIGH',
+        },
+        'some debug id'
+      );
+    });
+  });
+});

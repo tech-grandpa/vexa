@@ -1,0 +1,1425 @@
+/* eslint-disable @typescript-eslint/no-unused-vars */
+/* eslint-disable class-methods-use-this */
+/* eslint-disable valid-jsdoc */
+import {BrowserDetection, getBrowserSerial} from '@webex/common';
+import uuid from 'uuid';
+import {merge} from 'lodash';
+import {StatelessWebexPlugin} from '@webex/webex-core';
+import {getOSNameInternal} from '../metrics';
+
+import {
+  anonymizeIPAddress,
+  clearEmptyKeysRecursively,
+  isLocusServiceErrorCode,
+  prepareDiagnosticMetricItem,
+  userAgentToString,
+  extractVersionMetadata,
+  isMeetingInfoServiceError,
+  isBrowserMediaErrorName,
+  isNetworkError,
+  isUnauthorizedError,
+  isSdpOfferCreationError,
+} from './call-diagnostic-metrics.util';
+import {CLIENT_NAME} from '../config';
+import {
+  Event,
+  ClientType,
+  SubClientType,
+  NetworkType,
+  EnvironmentType,
+  NewEnvironmentType,
+  ClientEvent,
+  SubmitClientEventOptions,
+  MediaQualityEvent,
+  SubmitMQEOptions,
+  SubmitMQEPayload,
+  ClientLaunchMethodType,
+  ClientEventError,
+  ClientEventPayload,
+  ClientInfo,
+  ClientEventPayloadError,
+  ClientSubServiceType,
+  BrowserLaunchMethodType,
+  DelayedClientEvent,
+  DelayedClientFeatureEvent,
+  FeatureEvent,
+  ClientFeatureEventPayload,
+} from '../metrics.types';
+import CallDiagnosticEventsBatcher from './call-diagnostic-metrics-batcher';
+import PreLoginMetricsBatcher from '../prelogin-metrics-batcher';
+
+import {
+  CLIENT_ERROR_CODE_TO_ERROR_PAYLOAD,
+  CALL_DIAGNOSTIC_EVENT_FAILED_TO_SEND,
+  NEW_LOCUS_ERROR_CLIENT_CODE,
+  SERVICE_ERROR_CODES_TO_CLIENT_ERROR_CODES_MAP,
+  UNKNOWN_ERROR,
+  BROWSER_MEDIA_ERROR_NAME_TO_CLIENT_ERROR_CODES_MAP,
+  MEETING_INFO_LOOKUP_ERROR_CLIENT_CODE,
+  CALL_DIAGNOSTIC_LOG_IDENTIFIER,
+  NETWORK_ERROR,
+  AUTHENTICATION_FAILED_CODE,
+  WEBEX_SUB_SERVICE_TYPES,
+  SDP_OFFER_CREATION_ERROR_MAP,
+  CALL_FEATURE_LOG_IDENTIFIER,
+  CALL_FEATURE_EVENT_FAILED_TO_SEND,
+} from './config';
+
+const {getOSVersion, getBrowserName, getBrowserVersion} = BrowserDetection();
+
+type GetOriginOptions = {
+  clientType: ClientType;
+  subClientType: SubClientType;
+  networkType?: NetworkType;
+  clientLaunchMethod?: ClientLaunchMethodType;
+  browserLaunchMethod?: BrowserLaunchMethodType;
+  environment?: EnvironmentType;
+  newEnvironment?: NewEnvironmentType;
+  vendorId?: string;
+};
+
+type GetIdentifiersOptions = {
+  meeting?: any;
+  mediaConnections?: any[];
+  correlationId?: string;
+  sessionCorrelationId?: string;
+  preLoginId?: string;
+  globalMeetingId?: string;
+  webexConferenceIdStr?: string;
+};
+
+/**
+ * @description Util class to handle Call Analyzer Metrics
+ * @export
+ * @class CallDiagnosticMetrics
+ */
+export default class CallDiagnosticMetrics extends StatelessWebexPlugin {
+  // @ts-ignore
+  private callDiagnosticEventsBatcher: CallDiagnosticEventsBatcher;
+  // @ts-ignore
+  private preLoginMetricsBatcher: PreLoginMetricsBatcher;
+
+  private logger: any; // to avoid adding @ts-ignore everywhere
+  private hasLoggedBrowserSerial: boolean;
+  private device: any;
+  private delayedClientEvents: DelayedClientEvent[] = [];
+  private delayedClientFeatureEvents: DelayedClientFeatureEvent[] = [];
+  private eventErrorCache: WeakMap<any, any> = new WeakMap();
+  private isMercuryConnected = false;
+  private eventLimitTracker: Map<string, number> = new Map();
+  private eventLimitWarningsLogged: Set<string> = new Set();
+
+  // the default validator before piping an event to the batcher
+  // this function can be overridden by the user
+  public validator: (options: {
+    type: 'mqe' | 'ce';
+    event: Event;
+  }) => Promise<{event: Event; valid: boolean}> = (options: {type: 'mqe' | 'ce'; event: Event}) =>
+    Promise.resolve({event: options?.event, valid: true});
+
+  /**
+   * Constructor
+   * @param args
+   */
+  constructor(...args) {
+    super(...args);
+    // @ts-ignore
+    this.logger = this.webex.logger;
+    // @ts-ignore
+    this.callDiagnosticEventsBatcher = new CallDiagnosticEventsBatcher({}, {parent: this.webex});
+    // @ts-ignore
+    this.preLoginMetricsBatcher = new PreLoginMetricsBatcher({}, {parent: this.webex});
+  }
+
+  /**
+   * Returns the login type of the current user
+   * @returns one of 'login-ci','unverified-guest', null
+   */
+  getCurLoginType() {
+    // @ts-ignore
+    if (this.webex.canAuthorize) {
+      // @ts-ignore
+      return this.webex.credentials.isUnverifiedGuest ? 'unverified-guest' : 'login-ci';
+    }
+
+    return null;
+  }
+
+  /**
+   * Returns if the meeting has converged architecture enabled
+   * @param options.meetingId
+   */
+  getIsConvergedArchitectureEnabled({meetingId}: {meetingId?: string}): boolean {
+    if (meetingId) {
+      // @ts-ignore
+      const meeting = this.webex.meetings.getBasicMeetingInformation(meetingId);
+
+      return meeting?.meetingInfo?.enableConvergedArchitecture;
+    }
+
+    return undefined;
+  }
+
+  /**
+   * Sets mercury connected status for event data object in CA events
+   * @public
+   * @param status - boolean value indicating mercury connection status
+   * @return {void}
+   */
+  public setMercuryConnectedStatus(status: boolean): void {
+    this.isMercuryConnected = status;
+  }
+
+  /**
+   * Returns meeting's subServiceType
+   * @param meeting
+   * @returns
+   */
+  getSubServiceType(meeting?: any): ClientSubServiceType {
+    if (meeting) {
+      // @ts-ignore
+      const meetingInfo = meeting?.meetingInfo;
+      // if not Scheduled, not Webinar, pmr - then pmr
+      if (!meetingInfo?.webexScheduled && !meetingInfo?.enableEvent && meetingInfo?.pmr) {
+        return WEBEX_SUB_SERVICE_TYPES.PMR;
+      }
+      // if Scheduled, not Webinar, not pmr - then ScheduledMeeting
+      if (meetingInfo?.webexScheduled && !meetingInfo?.enableEvent && !meetingInfo?.pmr) {
+        return WEBEX_SUB_SERVICE_TYPES.SCHEDULED_MEETING;
+      }
+
+      // if ConvergedArchitecture enable and isConvergedWebinarWebcast -- then webcast
+      if (meetingInfo?.enableConvergedArchitecture && meetingInfo?.enableEvent) {
+        return meetingInfo?.isConvergedWebinarWebcast
+          ? WEBEX_SUB_SERVICE_TYPES.WEBCAST
+          : WEBEX_SUB_SERVICE_TYPES.WEBINAR;
+      }
+
+      // if Scheduled, enable event, not pmr - then Webinar
+      if (meetingInfo?.webexScheduled && meetingInfo?.enableEvent && !meetingInfo?.pmr) {
+        return WEBEX_SUB_SERVICE_TYPES.WEBINAR;
+      }
+    }
+
+    return undefined;
+  }
+
+  /**
+   * Get origin object for Call Diagnostic Event payload.
+   * @param options
+   * @param meetingId
+   * @returns
+   */
+  getOrigin(options: GetOriginOptions, meetingId?: string) {
+    const defaultClientType: ClientType =
+      // @ts-ignore
+      this.webex.meetings.config?.metrics?.clientType;
+    const defaultSubClientType: SubClientType =
+      // @ts-ignore
+      this.webex.meetings.config?.metrics?.subClientType;
+    // @ts-ignore
+    const providedClientVersion: string = this.webex.meetings.config?.metrics?.clientVersion;
+    // @ts-ignore
+    const defaultSDKClientVersion = `${CLIENT_NAME}/${this.webex.version}`;
+
+    let versionMetadata: Pick<ClientInfo, 'majorVersion' | 'minorVersion'> = {};
+
+    // sdk version split doesn't really make sense for now...
+    if (providedClientVersion) {
+      versionMetadata = extractVersionMetadata(providedClientVersion);
+    }
+
+    if (!this.hasLoggedBrowserSerial) {
+      this.logger.log(
+        CALL_DIAGNOSTIC_LOG_IDENTIFIER,
+        `CallDiagnosticMetrics: @createClientEventObjectInMeeting => collected browser data`,
+        JSON.stringify(getBrowserSerial())
+      );
+
+      this.hasLoggedBrowserSerial = true;
+    }
+
+    if (
+      (defaultClientType && defaultSubClientType) ||
+      (options.clientType && options.subClientType)
+    ) {
+      const origin: Event['origin'] = {
+        name: 'endpoint',
+        networkType: options?.networkType || 'unknown',
+        userAgent: userAgentToString({
+          // @ts-ignore
+          clientName: this.webex.meetings?.config?.metrics?.clientName,
+          // @ts-ignore
+          webexVersion: this.webex.version,
+        }),
+        clientInfo: {
+          clientType: options?.clientType || defaultClientType,
+          clientVersion: providedClientVersion || defaultSDKClientVersion,
+          ...versionMetadata,
+          publicNetworkPrefix:
+            // @ts-ignore
+            anonymizeIPAddress(this.webex.meetings.geoHintInfo?.clientAddress) || undefined,
+          localNetworkPrefix:
+            anonymizeIPAddress(
+              // @ts-ignore
+              this.webex.meetings.meetingCollection
+                .get(meetingId)
+                ?.statsAnalyzer?.getLocalIpAddress()
+            ) || undefined,
+          osVersion: getOSVersion() || 'unknown',
+          subClientType: options?.subClientType || defaultSubClientType,
+          os: getOSNameInternal(),
+          browser: getBrowserName(),
+          browserVersion: getBrowserVersion(),
+        },
+      };
+
+      if (meetingId) {
+        // @ts-ignore
+        const meeting = this.webex.meetings.getBasicMeetingInformation(meetingId);
+        if (meeting?.environment) {
+          origin.environment = meeting.environment;
+        }
+      }
+
+      if (options?.environment) {
+        origin.environment = options.environment;
+      }
+
+      if (options?.newEnvironment) {
+        origin.newEnvironment = options.newEnvironment;
+      }
+
+      if (options?.clientLaunchMethod) {
+        origin.clientInfo.clientLaunchMethod = options.clientLaunchMethod;
+      }
+
+      if (options?.browserLaunchMethod) {
+        origin.clientInfo.browserLaunchMethod = options.browserLaunchMethod;
+      }
+
+      if (options?.vendorId) {
+        origin.clientInfo.vendorId = options.vendorId;
+      }
+
+      return origin;
+    }
+
+    throw new Error("ClientType and SubClientType can't be undefined");
+  }
+
+  /**
+   * Gather identifier details for call diagnostic payload.
+   * @throws Error if initialization fails.
+   * @param options
+   */
+  getIdentifiers(options: GetIdentifiersOptions) {
+    const {
+      meeting,
+      mediaConnections,
+      correlationId,
+      webexConferenceIdStr,
+      globalMeetingId,
+      preLoginId,
+      sessionCorrelationId,
+    } = options;
+    const identifiers: Event['event']['identifiers'] = {
+      correlationId: 'unknown', // concerned with setting this to unknown. This will fail diagnostic events parsing because it's not a uuid pattern
+    };
+
+    if (meeting) {
+      identifiers.correlationId = meeting.correlationId;
+      if (meeting.sessionCorrelationId) {
+        identifiers.sessionCorrelationId = meeting.sessionCorrelationId;
+      }
+    }
+
+    if (sessionCorrelationId) {
+      identifiers.sessionCorrelationId = sessionCorrelationId;
+    }
+
+    if (sessionCorrelationId) {
+      identifiers.sessionCorrelationId = sessionCorrelationId;
+    }
+
+    if (correlationId) {
+      identifiers.correlationId = correlationId;
+    }
+
+    // TODO: should we use patterns.uuid to validate correlationId and session correlation id? they will fail the diagnostic events validation pipeline if improperly formatted
+
+    if (this.device) {
+      const {device} = this;
+      const {installationId} = device?.config || {};
+
+      identifiers.userId = device?.userId || preLoginId;
+      identifiers.deviceId = device?.url;
+      identifiers.orgId = device?.orgId;
+      // @ts-ignore
+      identifiers.locusUrl = this.webex.internal.services.get('locus');
+
+      if (installationId) {
+        identifiers.machineId = installationId;
+      }
+    }
+
+    if (meeting?.locusInfo?.fullState) {
+      identifiers.locusUrl = meeting.locusUrl;
+      identifiers.locusId = meeting.locusUrl && meeting.locusUrl.split('/').pop();
+      identifiers.locusStartTime =
+        meeting.locusInfo.fullState && meeting.locusInfo.fullState.lastActive;
+    }
+
+    if (meeting?.meetingInfo?.confIdStr || meeting?.meetingInfo?.confID) {
+      identifiers.webexConferenceIdStr = `${
+        meeting.meetingInfo?.confIdStr || meeting.meetingInfo?.confID
+      }`;
+    }
+
+    if (meeting?.meetingInfo?.meetingId) {
+      identifiers.globalMeetingId = meeting.meetingInfo?.meetingId;
+    }
+
+    if (meeting?.meetingInfo?.siteName) {
+      identifiers.webexSiteName = meeting.meetingInfo?.siteName;
+    }
+
+    if (mediaConnections) {
+      identifiers.mediaAgentAlias = mediaConnections?.[0]?.mediaAgentAlias;
+      identifiers.mediaAgentGroupId = mediaConnections?.[0]?.mediaAgentGroupId;
+    }
+
+    if (!identifiers?.webexConferenceIdStr && webexConferenceIdStr) {
+      identifiers.webexConferenceIdStr = `${webexConferenceIdStr}`;
+    }
+
+    if (!identifiers?.globalMeetingId && globalMeetingId) {
+      identifiers.globalMeetingId = globalMeetingId;
+    }
+
+    if (identifiers.correlationId === undefined) {
+      throw new Error('Identifiers initialization failed.');
+    }
+
+    return identifiers;
+  }
+
+  /**
+   * Create diagnostic event, which can hold client event, feature event or MQE event data.
+   * This just initiates the shared properties that are required for all the 3 event categories.
+   * @param eventData
+   * @param options
+   * @returns
+   */
+  prepareDiagnosticEvent(eventData: Event['event'], options: any) {
+    const {meetingId, triggeredTime} = options;
+    const origin = this.getOrigin(options, meetingId);
+
+    const event: Event = {
+      eventId: uuid.v4(),
+      version: 1,
+      origin,
+      originTime: {
+        triggered: triggeredTime || new Date().toISOString(),
+        // is overridden in prepareRequest batcher
+        sent: 'not_defined_yet',
+      },
+      // @ts-ignore
+      senderCountryCode: this.webex.meetings.geoHintInfo?.countryCode,
+      event: eventData,
+    };
+
+    // sanitize (remove empty properties, CA requires it)
+    // but we don't want to sanitize MQE as most of the times
+    // values will be 0, [] etc, and they are required.
+    if (eventData.name !== 'client.mediaquality.event') {
+      clearEmptyKeysRecursively(event);
+    }
+
+    return event;
+  }
+
+  /**
+   * Create feature event
+   * @param name
+   * @param payload
+   * @param options
+   * @returns
+   */
+  private prepareClientFeatureEvent({
+    name,
+    payload,
+    options,
+  }: {
+    name: FeatureEvent['name'];
+    payload?: ClientFeatureEventPayload;
+    options?: SubmitClientEventOptions;
+  }) {
+    const {meetingId, correlationId} = options;
+    let featureEventObject: FeatureEvent['payload'];
+
+    // events that will most likely happen in join phase
+    if (meetingId) {
+      featureEventObject = this.createFeatureEventObjectInMeeting({name, options});
+    } else {
+      throw new Error('Not implemented');
+    }
+
+    // merge any new properties, or override existing ones
+    featureEventObject = merge(featureEventObject, payload);
+
+    // append client event data to the call diagnostic event
+    const featureEvent = this.prepareDiagnosticEvent(featureEventObject, options);
+
+    return featureEvent;
+  }
+
+  /**
+   * Submit Feature Event
+   * submit to business_ucf
+   * @returns
+   */
+  public submitFeatureEvent({
+    name,
+    payload,
+    options,
+    delaySubmitEvent,
+  }: {
+    name: FeatureEvent['name'];
+    payload?: ClientFeatureEventPayload;
+    options?: SubmitClientEventOptions;
+    delaySubmitEvent?: boolean;
+  }) {
+    if (delaySubmitEvent) {
+      // Preserve the time when the event was triggered if delaying the submission to Call Features
+      const delayedOptions = {
+        ...options,
+        triggeredTime: new Date().toISOString(),
+      };
+
+      this.delayedClientFeatureEvents.push({
+        name,
+        payload,
+        options: delayedOptions,
+      });
+
+      return Promise.resolve();
+    }
+
+    this.logger.log(
+      CALL_FEATURE_LOG_IDENTIFIER,
+      'CallFeatureMetrics: @submitFeatureEvent. Submit Client Feature Event CA event.',
+      `name: ${name}`
+    );
+    const featureEvent = this.prepareClientFeatureEvent({name, payload, options});
+
+    this.validator({type: 'ce', event: featureEvent});
+
+    return this.submitToCallFeatures(featureEvent);
+  }
+
+  /**
+   * Submit Feature Event
+   * type is business
+   * @param event
+   */
+  submitToCallFeatures(event: Event): Promise<any> {
+    // build metrics-a event type
+    const finalEvent = {
+      eventPayload: event,
+      type: ['business'],
+    };
+
+    return this.callDiagnosticEventsBatcher.request(finalEvent);
+  }
+
+  /**
+   * Submit Media Quality Event
+   * @param args - submit params
+   * @param arg.name - event key
+   * @param arg.payload - additional payload to be merge with the default payload
+   * @param arg.options - options
+   */
+  submitMQE({
+    name,
+    payload,
+    options,
+  }: {
+    name: MediaQualityEvent['name'];
+    payload: SubmitMQEPayload;
+    options: SubmitMQEOptions;
+  }) {
+    const {meetingId, mediaConnections, webexConferenceIdStr, globalMeetingId} = options;
+
+    // events that will most likely happen in join phase
+    if (meetingId) {
+      // @ts-ignore
+      const meeting = this.webex.meetings.getBasicMeetingInformation(meetingId);
+
+      if (!meeting) {
+        console.warn(
+          'Attempt to send MQE but no meeting was found...',
+          `event: ${name}, meetingId: ${meetingId}`
+        );
+        // @ts-ignore
+        this.webex.internal.metrics.submitClientMetrics(CALL_DIAGNOSTIC_EVENT_FAILED_TO_SEND, {
+          fields: {
+            meetingId,
+            name,
+          },
+        });
+
+        return;
+      }
+
+      // merge identifiers
+      const identifiers = this.getIdentifiers({
+        meeting,
+        mediaConnections: meeting.mediaConnections || mediaConnections,
+        webexConferenceIdStr,
+        globalMeetingId,
+      });
+
+      // create media quality event object
+      let clientEventObject: MediaQualityEvent['payload'] = {
+        name,
+        canProceed: true,
+        identifiers,
+        eventData: {
+          webClientDomain: window.location.hostname,
+        },
+        intervals: payload.intervals,
+        callingServiceType: 'LOCUS',
+        meetingJoinInfo: {
+          clientSignallingProtocol: 'WebRTC',
+        },
+        sourceMetadata: {
+          applicationSoftwareType: CLIENT_NAME,
+          // @ts-ignore
+          applicationSoftwareVersion: this.webex.version,
+          mediaEngineSoftwareType: getBrowserName() || 'browser',
+          mediaEngineSoftwareVersion: getOSVersion() || 'unknown',
+          startTime: new Date().toISOString(),
+        },
+      };
+
+      // merge any new properties, or override existing ones
+      clientEventObject = merge(clientEventObject, payload);
+
+      // append media quality event data to the call diagnostic event
+      const diagnosticEvent = this.prepareDiagnosticEvent(clientEventObject, options);
+      this.validator({type: 'mqe', event: diagnosticEvent});
+      this.submitToCallDiagnostics(diagnosticEvent);
+    } else {
+      throw new Error(
+        'Media quality events cant be sent outside the context of a meeting. Meeting id is required.'
+      );
+    }
+  }
+
+  /**
+   * Return Client Event payload by client error code
+   * @param arg - get error arg
+   * @param arg.clientErrorCode
+   * @param arg.serviceErrorCode
+   * @param arg.payloadOverrides
+   * @param arg.httpStatusCode
+   * @returns
+   */
+  public getErrorPayloadForClientErrorCode({
+    clientErrorCode,
+    serviceErrorCode,
+    serviceErrorName,
+    rawErrorMessage,
+    payloadOverrides,
+    httpStatusCode,
+  }: {
+    clientErrorCode: number;
+    serviceErrorCode: any;
+    serviceErrorName?: any;
+    rawErrorMessage?: string;
+    payloadOverrides?: any;
+    httpStatusCode?: number;
+  }): ClientEventError {
+    let error: ClientEventError;
+
+    if (clientErrorCode) {
+      const partialParsedError = CLIENT_ERROR_CODE_TO_ERROR_PAYLOAD[clientErrorCode];
+
+      if (partialParsedError) {
+        error = merge(
+          {fatal: true, shownToUser: false, name: 'other', category: 'other'}, // default values
+          {errorCode: clientErrorCode},
+          serviceErrorName ? {errorData: {errorName: serviceErrorName}} : {},
+          {serviceErrorCode},
+          {rawErrorMessage},
+          httpStatusCode === undefined ? {} : {httpStatusCode},
+          partialParsedError,
+          payloadOverrides || {}
+        );
+
+        return error;
+      }
+    }
+
+    return undefined;
+  }
+
+  /**
+   * Clear the error cache
+   */
+  clearErrorCache() {
+    this.eventErrorCache = new WeakMap();
+  }
+
+  /**
+   * Checks if an event should be limited based on criteria defined in the event dictionary.
+   * Returns true if the event should be sent, false if it has reached its limit.
+   * @param event - The diagnostic event object
+   * @returns boolean indicating whether the event should be sent
+   */
+  private shouldSendEvent({event}: Event): boolean {
+    const eventName = event?.name as string;
+    const correlationId = event?.identifiers?.correlationId;
+
+    if (!correlationId || correlationId === 'unknown') {
+      return true;
+    }
+
+    const limitKeyPrefix = `${eventName}:${correlationId}`;
+
+    switch (eventName) {
+      case 'client.media.render.start':
+      case 'client.media.render.stop':
+      case 'client.media.rx.start':
+      case 'client.media.rx.stop':
+      case 'client.media.tx.start':
+      case 'client.media.tx.stop': {
+        // Send only once per mediaType-correlationId pair (or mediaType-correlationId-shareInstanceId for share/share_audio)
+        const mediaType = event?.mediaType;
+        if (mediaType) {
+          if (mediaType === 'share' || mediaType === 'share_audio') {
+            const shareInstanceId = event?.shareInstanceId;
+            if (shareInstanceId) {
+              const limitKey = `${limitKeyPrefix}:${mediaType}:${shareInstanceId}`;
+
+              return this.checkAndIncrementEventCount(
+                limitKey,
+                1,
+                `${eventName} for ${mediaType} instance ${shareInstanceId}`
+              );
+            }
+          } else {
+            const limitKey = `${limitKeyPrefix}:${mediaType}`;
+
+            return this.checkAndIncrementEventCount(
+              limitKey,
+              1,
+              `${eventName} for mediaType ${mediaType}`
+            );
+          }
+        }
+        break;
+      }
+
+      case 'client.roap-message.received':
+      case 'client.roap-message.sent': {
+        // Send only once per correlationId and roap.messageType/roap.type
+        const roapMessageType = event?.roap?.messageType || event?.roap?.type;
+        if (roapMessageType) {
+          const limitKey = `${limitKeyPrefix}:${roapMessageType}`;
+
+          return this.checkAndIncrementEventCount(
+            limitKey,
+            1,
+            `${eventName} for ROAP type ${roapMessageType}`
+          );
+        }
+        break;
+      }
+
+      default:
+        return true;
+    }
+
+    return true;
+  }
+
+  /**
+   * Checks the current count for a limit key and increments if under limit.
+   * @param limitKey - The unique key for this limit combination
+   * @param maxCount - Maximum allowed count
+   * @param eventDescription - Description for logging
+   * @returns true if under limit and incremented, false if at/over limit
+   */
+  private checkAndIncrementEventCount(
+    limitKey: string,
+    maxCount: number,
+    eventDescription: string
+  ): boolean {
+    const currentCount = this.eventLimitTracker.get(limitKey) || 0;
+
+    if (currentCount >= maxCount) {
+      // Log warning only once per limit key
+      if (!this.eventLimitWarningsLogged.has(limitKey)) {
+        this.logger.log(
+          CALL_DIAGNOSTIC_LOG_IDENTIFIER,
+          `CallDiagnosticMetrics: Event limit reached for ${eventDescription}. ` +
+            `Max count ${maxCount} exceeded. Event will not be sent.`,
+          `limitKey: ${limitKey}`
+        );
+        this.eventLimitWarningsLogged.add(limitKey);
+      }
+
+      return false;
+    }
+
+    // Increment count and allow event
+    this.eventLimitTracker.set(limitKey, currentCount + 1);
+
+    return true;
+  }
+
+  /**
+   * Clears event limit tracking
+   */
+  public clearEventLimits(): void {
+    this.eventLimitTracker.clear();
+    this.eventLimitWarningsLogged.clear();
+  }
+
+  /**
+   * Clears event limit tracking for a specific correlationId only.
+   * Keeps limits for other meetings intact.
+   */
+  public clearEventLimitsForCorrelationId(correlationId: string): void {
+    if (!correlationId) {
+      return;
+    }
+    // Keys are formatted as "eventName:correlationId:..." across all limiters.
+    const hasCorrIdAtSecondToken = (key: string) => key.split(':')[1] === correlationId;
+    for (const key of Array.from(this.eventLimitTracker.keys())) {
+      if (hasCorrIdAtSecondToken(key)) {
+        this.eventLimitTracker.delete(key);
+      }
+    }
+    for (const key of Array.from(this.eventLimitWarningsLogged.values())) {
+      if (hasCorrIdAtSecondToken(key)) {
+        this.eventLimitWarningsLogged.delete(key);
+      }
+    }
+  }
+
+  /**
+   * Generate error payload for Client Event
+   * @param rawError
+   */
+  generateClientEventErrorPayload(rawError: any) {
+    const cachedError = this.eventErrorCache.get(rawError);
+
+    if (cachedError) {
+      return [cachedError, true];
+    }
+
+    const rawErrorMessage = rawError.message;
+    const httpStatusCode = rawError.statusCode;
+    let payload;
+
+    if (rawError.name) {
+      if (isBrowserMediaErrorName(rawError.name)) {
+        payload = this.getErrorPayloadForClientErrorCode({
+          serviceErrorCode: undefined,
+          clientErrorCode: BROWSER_MEDIA_ERROR_NAME_TO_CLIENT_ERROR_CODES_MAP[rawError.name],
+          serviceErrorName: rawError.name,
+          rawErrorMessage,
+          httpStatusCode,
+        });
+      }
+    }
+
+    if (isSdpOfferCreationError(rawError) && !payload) {
+      // error code is 30005, but that's not specific enough. we also need to check error.cause.type
+      const causeType = rawError.cause?.type;
+
+      payload = this.getErrorPayloadForClientErrorCode({
+        serviceErrorCode: undefined,
+        clientErrorCode:
+          SDP_OFFER_CREATION_ERROR_MAP[causeType] || SDP_OFFER_CREATION_ERROR_MAP.GENERAL,
+        serviceErrorName: rawError.name,
+        rawErrorMessage,
+        httpStatusCode,
+      });
+    }
+
+    const serviceErrorCode =
+      rawError?.error?.body?.errorCode ||
+      rawError?.body?.errorCode ||
+      rawError?.body?.code ||
+      rawError?.body?.reason?.reasonCode;
+
+    if (serviceErrorCode) {
+      const clientErrorCode = SERVICE_ERROR_CODES_TO_CLIENT_ERROR_CODES_MAP[serviceErrorCode];
+      if (clientErrorCode && !payload) {
+        payload = this.getErrorPayloadForClientErrorCode({
+          clientErrorCode,
+          serviceErrorCode,
+          rawErrorMessage,
+          httpStatusCode,
+        });
+      }
+
+      // by default, if it is locus error, return new locus err
+      if (isLocusServiceErrorCode(serviceErrorCode) && !payload) {
+        payload = this.getErrorPayloadForClientErrorCode({
+          clientErrorCode: NEW_LOCUS_ERROR_CLIENT_CODE,
+          serviceErrorCode,
+          rawErrorMessage,
+          httpStatusCode,
+        });
+      }
+    }
+
+    if (isMeetingInfoServiceError(rawError) && !payload) {
+      payload = this.getErrorPayloadForClientErrorCode({
+        clientErrorCode: MEETING_INFO_LOOKUP_ERROR_CLIENT_CODE,
+        serviceErrorCode,
+        rawErrorMessage,
+        httpStatusCode,
+      });
+    }
+
+    if (isNetworkError(rawError) && !payload) {
+      payload = this.getErrorPayloadForClientErrorCode({
+        clientErrorCode: NETWORK_ERROR,
+        serviceErrorCode,
+        payloadOverrides: rawError.payloadOverrides,
+        rawErrorMessage,
+        httpStatusCode,
+      });
+    }
+
+    if (isUnauthorizedError(rawError) && !payload) {
+      payload = this.getErrorPayloadForClientErrorCode({
+        clientErrorCode: AUTHENTICATION_FAILED_CODE,
+        serviceErrorCode,
+        payloadOverrides: rawError.payloadOverrides,
+        rawErrorMessage,
+        httpStatusCode,
+      });
+    }
+
+    if (!payload) {
+      // otherwise return unkown error but passing serviceErrorCode and serviceErrorName so that we know the issue
+      payload = this.getErrorPayloadForClientErrorCode({
+        clientErrorCode: UNKNOWN_ERROR,
+        serviceErrorCode: serviceErrorCode || UNKNOWN_ERROR,
+        serviceErrorName: rawError?.name,
+        payloadOverrides: rawError.payloadOverrides,
+        rawErrorMessage,
+        httpStatusCode,
+      });
+    }
+
+    // cache the payload for future use
+    this.eventErrorCache.set(rawError, payload);
+
+    return [payload, false];
+  }
+
+  /**
+   * Create common object for in meeting events
+   * @param name
+   * @param options
+   * @param eventType - 'client' | 'feature'
+   * @returns object
+   */
+  private createCommonEventObjectInMeeting({
+    name,
+    options,
+    eventType = 'client',
+  }: {
+    name: string;
+    options?: SubmitClientEventOptions;
+    eventType?: 'client' | 'feature';
+  }) {
+    const {
+      meetingId,
+      mediaConnections,
+      globalMeetingId,
+      webexConferenceIdStr,
+      sessionCorrelationId,
+    } = options;
+
+    // @ts-ignore
+    const meeting = this.webex.meetings.getBasicMeetingInformation(meetingId);
+
+    if (!meeting) {
+      console.warn(
+        'Attempt to send common event but no meeting was found...',
+        `name: ${name}, meetingId: ${meetingId}`
+      );
+      // @ts-ignore
+      this.webex.internal.metrics.submitClientMetrics(
+        eventType === 'feature'
+          ? CALL_FEATURE_EVENT_FAILED_TO_SEND
+          : CALL_DIAGNOSTIC_EVENT_FAILED_TO_SEND,
+        {
+          fields: {
+            meetingId,
+            name,
+          },
+        }
+      );
+
+      return undefined;
+    }
+
+    // grab identifiers
+    const identifiers = this.getIdentifiers({
+      meeting,
+      mediaConnections: meeting?.mediaConnections || mediaConnections,
+      webexConferenceIdStr,
+      globalMeetingId,
+      sessionCorrelationId,
+    });
+
+    // create common event object structur
+    const commonEventObject = {
+      name,
+      canProceed: true,
+      identifiers,
+      eventData: {
+        webClientDomain: window.location.hostname,
+      },
+      userType: meeting.getCurUserType(),
+      loginType:
+        'loginType' in meeting.callStateForMetrics
+          ? meeting.callStateForMetrics.loginType
+          : this.getCurLoginType(),
+      isConvergedArchitectureEnabled: this.getIsConvergedArchitectureEnabled({
+        meetingId,
+      }),
+      ...(meeting.userNameInput && {userNameInput: meeting.userNameInput}),
+      ...(meeting.emailInput && {emailInput: meeting.emailInput}),
+      webexSubServiceType: this.getSubServiceType(meeting),
+      // @ts-ignore
+      webClientPreload: this.webex.meetings?.config?.metrics?.webClientPreload,
+    };
+
+    const joinFlowVersion = options.joinFlowVersion ?? meeting.callStateForMetrics?.joinFlowVersion;
+    if (joinFlowVersion) {
+      // @ts-ignore
+      commonEventObject.joinFlowVersion = joinFlowVersion;
+    }
+    const meetingJoinedTime = meeting.isoLocalClientMeetingJoinTime;
+    if (meetingJoinedTime) {
+      // @ts-ignore
+      commonEventObject.meetingJoinedTime = meetingJoinedTime;
+    }
+
+    if (options.meetingJoinPhase) {
+      // @ts-ignore
+      commonEventObject.meetingJoinPhase = options.meetingJoinPhase;
+    }
+
+    return commonEventObject;
+  }
+
+  /**
+   * Create client event object for in meeting events
+   * @param arg - create args
+   * @param arg.event - event key
+   * @param arg.options - options
+   * @returns object
+   */
+  private createClientEventObjectInMeeting({
+    name,
+    options,
+    errors,
+  }: {
+    name: ClientEvent['name'];
+    options?: SubmitClientEventOptions;
+    errors?: ClientEventPayloadError;
+  }) {
+    const commonObject = this.createCommonEventObjectInMeeting({
+      name,
+      options,
+      eventType: 'client',
+    });
+    if (!commonObject) return undefined;
+
+    return {
+      ...commonObject,
+      errors,
+      eventData: {
+        ...commonObject.eventData,
+        isMercuryConnected: this.isMercuryConnected,
+      },
+    } as ClientEvent['payload'];
+  }
+
+  /**
+   * Create feature event object for in meeting function event
+   * @param name
+   * @param options
+   * @returns object
+   */
+  private createFeatureEventObjectInMeeting({
+    name,
+    options,
+  }: {
+    name: FeatureEvent['name'];
+    options?: SubmitClientEventOptions;
+  }) {
+    const commonObject = this.createCommonEventObjectInMeeting({
+      name,
+      options,
+      eventType: 'feature',
+    });
+    if (!commonObject) return undefined;
+
+    return {
+      ...commonObject,
+      key: 'UcfFeatureUsage',
+    } as FeatureEvent['payload'];
+  }
+
+  /**
+   * Create client event object for pre meeting events
+   * @param arg - create args
+   * @param arg.event - event key
+   * @param arg.options - payload
+   * @returns object
+   */
+  private createClientEventObjectPreMeeting({
+    name,
+    options,
+    errors,
+  }: {
+    name: ClientEvent['name'];
+    options?: SubmitClientEventOptions;
+    errors?: ClientEventPayloadError;
+  }) {
+    const {correlationId, globalMeetingId, webexConferenceIdStr, preLoginId, sessionCorrelationId} =
+      options;
+
+    // grab identifiers
+    const identifiers = this.getIdentifiers({
+      correlationId,
+      sessionCorrelationId,
+      preLoginId,
+      globalMeetingId,
+      webexConferenceIdStr,
+    });
+
+    // create client event object
+    const clientEventObject: ClientEvent['payload'] = {
+      name,
+      errors,
+      canProceed: true,
+      identifiers,
+      eventData: {
+        webClientDomain: window.location.hostname,
+        isMercuryConnected: this.isMercuryConnected,
+      },
+      loginType: this.getCurLoginType(),
+      // @ts-ignore
+      webClientPreload: this.webex.meetings?.config?.metrics?.webClientPreload,
+    };
+
+    if (options.joinFlowVersion) {
+      clientEventObject.joinFlowVersion = options.joinFlowVersion;
+    }
+
+    if (options.meetingJoinPhase) {
+      clientEventObject.meetingJoinPhase = options.meetingJoinPhase;
+    }
+
+    if (options.userNameInput) {
+      clientEventObject.userNameInput = options.userNameInput;
+    }
+
+    if (options.emailInput) {
+      clientEventObject.emailInput = options.emailInput;
+    }
+
+    return clientEventObject;
+  }
+
+  /**
+   * Prepare Client Event CA event.
+   * @param arg - submit params
+   * @param arg.event - event key
+   * @param arg.payload - additional payload to be merged with default payload
+   * @param arg.options - payload
+   * @returns {any} options to be with fetch
+   * @throws
+   */
+  private prepareClientEvent({
+    name,
+    payload,
+    options,
+  }: {
+    name: ClientEvent['name'];
+    payload?: ClientEventPayload;
+    options?: SubmitClientEventOptions;
+  }) {
+    const {meetingId, correlationId, rawError} = options;
+    let clientEventObject: ClientEvent['payload'];
+
+    // check if we need to generate errors
+    const errors: ClientEventPayloadError = [];
+
+    if (rawError) {
+      const [generatedError, cached] = this.generateClientEventErrorPayload(rawError);
+      if (generatedError) {
+        errors.push(generatedError);
+      }
+      this.logger.log(
+        CALL_DIAGNOSTIC_LOG_IDENTIFIER,
+        'CallDiagnosticMetrics: @prepareClientEvent. Generated errors:',
+        `generatedError (cached: ${cached}): ${JSON.stringify(generatedError)}`
+      );
+    }
+
+    // events that will most likely happen in join phase
+    if (meetingId) {
+      clientEventObject = this.createClientEventObjectInMeeting({name, options, errors});
+    } else if (correlationId) {
+      // any pre join events or events that are outside the meeting.
+      clientEventObject = this.createClientEventObjectPreMeeting({name, options, errors});
+    } else {
+      throw new Error('Not implemented');
+    }
+
+    // merge any new properties, or override existing ones
+    clientEventObject = merge(clientEventObject, payload);
+
+    // append client event data to the call diagnostic event
+    const diagnosticEvent = this.prepareDiagnosticEvent(clientEventObject, options);
+
+    return diagnosticEvent;
+  }
+
+  /**
+   * Submit Client Event CA event.
+   * @param arg - submit params
+   * @param arg.event - event key
+   * @param arg.payload - additional payload to be merged with default payload
+   * @param arg.options - payload
+   * @param arg.delaySubmitEvent - a boolean value indicating whether to delay the submission of client events.
+   * @throws
+   */
+  public submitClientEvent({
+    name,
+    payload,
+    options,
+    delaySubmitEvent,
+  }: {
+    name: ClientEvent['name'];
+    payload?: ClientEventPayload;
+    options?: SubmitClientEventOptions;
+    delaySubmitEvent?: boolean;
+  }) {
+    if (delaySubmitEvent) {
+      // Preserve the time when the event was triggered if delaying the submission to Call Diagnostics
+      const delayedOptions = {
+        ...options,
+        triggeredTime: new Date().toISOString(),
+      };
+
+      this.delayedClientEvents.push({
+        name,
+        payload,
+        options: delayedOptions,
+      });
+
+      return Promise.resolve();
+    }
+
+    this.logger.log(
+      CALL_DIAGNOSTIC_LOG_IDENTIFIER,
+      'CallDiagnosticMetrics: @submitClientEvent. Submit Client Event CA event.',
+      `name: ${name}`
+    );
+    const diagnosticEvent = this.prepareClientEvent({name, payload, options});
+
+    if (!this.shouldSendEvent(diagnosticEvent)) {
+      return Promise.resolve();
+    }
+
+    if (options?.preLoginId) {
+      return this.submitToCallDiagnosticsPreLogin(diagnosticEvent, options?.preLoginId);
+    }
+
+    this.validator({type: 'ce', event: diagnosticEvent});
+
+    return this.submitToCallDiagnostics(diagnosticEvent);
+  }
+
+  /**
+   * Submit Delayed Client Event CA events. Clears delayedClientEvents array after submission.
+   */
+  public submitDelayedClientEvents(overrides?: Partial<DelayedClientEvent['options']>) {
+    this.logger.log(
+      CALL_DIAGNOSTIC_LOG_IDENTIFIER,
+      'CallDiagnosticMetrics: @submitDelayedClientEvents. Submitting delayed client events.'
+    );
+
+    if (this.delayedClientEvents.length === 0) {
+      return Promise.resolve();
+    }
+
+    const promises = this.delayedClientEvents.map((delayedSubmitClientEventParams) => {
+      const {name, payload, options} = delayedSubmitClientEventParams;
+      const optionsWithOverrides: DelayedClientEvent['options'] = {...options, ...overrides};
+
+      return this.submitClientEvent({name, payload, options: optionsWithOverrides});
+    });
+
+    this.delayedClientEvents = [];
+
+    return Promise.all(promises);
+  }
+
+  /**
+   * Submit Delayed feature Event CA events. Clears submitDelayedClientFeatureEvents array after submission.
+   */
+  public submitDelayedClientFeatureEvents(overrides?: Partial<DelayedClientEvent['options']>) {
+    this.logger.log(
+      CALL_FEATURE_LOG_IDENTIFIER,
+      'CallDiagnosticMetrics: @submitDelayedClientFeatureEvents. Submitting delayed feature events.'
+    );
+
+    if (this.delayedClientFeatureEvents.length === 0) {
+      return Promise.resolve();
+    }
+
+    const promises = this.delayedClientFeatureEvents.map((delayedSubmitClientEventParams) => {
+      const {name, payload, options} = delayedSubmitClientEventParams;
+      const optionsWithOverrides: DelayedClientEvent['options'] = {...options, ...overrides};
+
+      return this.submitFeatureEvent({name, payload, options: optionsWithOverrides});
+    });
+
+    this.delayedClientFeatureEvents = [];
+
+    return Promise.all(promises);
+  }
+
+  /**
+   * Prepare the event and send the request to metrics-a service.
+   * @param event
+   * @returns promise
+   */
+  submitToCallDiagnostics(event: Event): Promise<any> {
+    // build metrics-a event type
+    const finalEvent = {
+      eventPayload: event,
+      type: ['diagnostic-event'],
+    };
+
+    return this.callDiagnosticEventsBatcher.request(finalEvent);
+  }
+
+  /**
+   * Prepare the event and send the request to metrics-a service, pre login.
+   * @param event
+   * @param preLoginId
+   * @returns
+   */
+  submitToCallDiagnosticsPreLogin = (event: Event, preLoginId?: string): Promise<any> => {
+    // build metrics-a event type
+    const finalEvent = {
+      eventPayload: event,
+      type: ['diagnostic-event'],
+    };
+    this.preLoginMetricsBatcher.savePreLoginId(preLoginId);
+
+    return this.preLoginMetricsBatcher.request(finalEvent);
+  };
+
+  /**
+   * Builds a request options object to later be passed to fetch().
+   * @param arg - submit params
+   * @param arg.event - event key
+   * @param arg.payload - additional payload to be merged with default payload
+   * @param arg.options - client event options
+   * @returns {Promise<any>}
+   * @throws
+   */
+  public async buildClientEventFetchRequestOptions({
+    name,
+    payload,
+    options,
+  }: {
+    name: ClientEvent['name'];
+    payload?: ClientEventPayload;
+    options?: SubmitClientEventOptions;
+  }): Promise<any> {
+    this.logger.log(
+      CALL_DIAGNOSTIC_LOG_IDENTIFIER,
+      'CallDiagnosticMetrics: @buildClientEventFetchRequestOptions. Building request options object for fetch()...',
+      `name: ${name}`
+    );
+
+    const clientEvent = this.prepareClientEvent({name, payload, options});
+
+    // build metrics-a event type
+    // @ts-ignore
+    const diagnosticEvent = prepareDiagnosticMetricItem(this.webex, {
+      eventPayload: clientEvent,
+      type: ['diagnostic-event'],
+    });
+
+    const request = {
+      method: 'POST',
+      service: 'metrics',
+      resource: 'clientmetrics',
+      body: {
+        metrics: [diagnosticEvent],
+      },
+      headers: {},
+      // @ts-ignore
+      waitForServiceTimeout: this.webex.internal.metrics.config.waitForServiceTimeout,
+    };
+
+    if (options.preLoginId) {
+      request.headers = {
+        authorization: false,
+        'x-prelogin-userid': options.preLoginId,
+      };
+      request.resource = 'clientmetrics-prelogin';
+    }
+
+    // @ts-ignore
+    return this.webex.prepareFetchOptions(request);
+  }
+
+  /**
+   * Returns true if the specified serviceErrorCode maps to an expected error.
+   * @param {number} serviceErrorCode the service error code
+   * @returns {boolean}
+   */
+  public isServiceErrorExpected(serviceErrorCode: number): boolean {
+    const clientErrorCode = SERVICE_ERROR_CODES_TO_CLIENT_ERROR_CODES_MAP[serviceErrorCode];
+    const clientErrorPayload = CLIENT_ERROR_CODE_TO_ERROR_PAYLOAD[clientErrorCode];
+
+    return clientErrorPayload?.category === 'expected';
+  }
+
+  /**
+   * This method is used to set the device information by internal-plugin-device
+   * @param {device} object The webex.internal.device object
+   * @returns {undefined}
+   */
+  public setDeviceInfo(device: any): void {
+    // This was created to fix the circular dependency between internal-plugin-device and internal-plugin-metrics
+    this.logger.log('CallDiagnosticMetrics: @setDeviceInfo called', {
+      userId: device?.userId,
+      deviceId: device?.url,
+      orgId: device?.orgId,
+    });
+    this.device = device;
+  }
+}

@@ -10,7 +10,14 @@
   <div id="status">Initializing...</div>
   
   <!-- Load Webex SDK from CDN -->
-  <script crossorigin src="https://unpkg.com/webex@^3/umd/webex.min.js"></script>
+  <!-- Pin SDK version to avoid unexpected breakage from minor releases -->
+  <script crossorigin src="https://unpkg.com/webex@3.7.0/umd/webex.min.js"></script>
+  <script>
+    if (!window.Webex) {
+      document.getElementById('status').innerText = 'ERROR: Webex SDK failed to load from CDN';
+      console.error('[WEBEX] SDK failed to load from unpkg.com CDN');
+    }
+  </script>
   
   <script>
     // Global state exposed to Playwright

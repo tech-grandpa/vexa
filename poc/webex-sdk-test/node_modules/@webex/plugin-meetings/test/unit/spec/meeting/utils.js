@@ -1,0 +1,1514 @@
+import 'jsdom-global/register';
+import sinon from 'sinon';
+import {assert} from '@webex/test-helper-chai';
+import Meetings from '@webex/plugin-meetings';
+import MeetingUtil from '@webex/plugin-meetings/src/meeting/util';
+import {LOCAL_SHARE_ERRORS, PASSWORD_STATUS} from '@webex/plugin-meetings/src/constants';
+import LoggerProxy from '@webex/plugin-meetings/src/common/logs/logger-proxy';
+import LoggerConfig from '@webex/plugin-meetings/src/common/logs/logger-config';
+import {SELF_POLICY, IP_VERSION} from '@webex/plugin-meetings/src/constants';
+import MockWebex from '@webex/test-helper-mock-webex';
+import * as BrowserDetectionModule from '@webex/plugin-meetings/src/common/browser-detection';
+import PasswordError from '@webex/plugin-meetings/src/common/errors/password-error';
+import CaptchaError from '@webex/plugin-meetings/src/common/errors/captcha-error';
+
+describe('plugin-meetings', () => {
+  let webex;
+  describe('Meeting utils function', () => {
+    const sandbox = sinon.createSandbox();
+    const meeting = {};
+
+    beforeEach(() => {
+      webex = new MockWebex({
+        children: {
+          meetings: Meetings,
+        },
+      });
+
+      webex.meetings.reachability = {
+        getReachabilityReportToAttachToRoap: sinon.stub().resolves({}),
+        getClientMediaPreferences: sinon.stub().resolves({}),
+      };
+
+      const logger = {
+        info: sandbox.stub(),
+        log: sandbox.stub(),
+        error: sandbox.stub(),
+        warn: sandbox.stub(),
+        debug: sandbox.stub(),
+      };
+
+      LoggerConfig.set({
+        verboseEvents: true,
+        enable: true,
+      });
+      LoggerProxy.set(logger);
+
+      meeting.cleanupLocalStreams = sinon.stub().returns(Promise.resolve());
+      meeting.closeRemoteStreams = sinon.stub().returns(Promise.resolve());
+      meeting.closePeerConnections = sinon.stub().returns(Promise.resolve());
+      meeting.stopPeriodicLogUpload = sinon.stub();
+
+      meeting.unsetRemoteStreams = sinon.stub();
+      meeting.unsetPeerConnections = sinon.stub();
+      meeting.reconnectionManager = {cleanUp: sinon.stub()};
+      meeting.stopKeepAlive = sinon.stub();
+      meeting.updateLLMConnection = sinon.stub();
+      meeting.breakouts = {cleanUp: sinon.stub()};
+      meeting.annotaion = {cleanUp: sinon.stub()};
+      meeting.getWebexObject = sinon.stub().returns(webex);
+      meeting.simultaneousInterpretation = {cleanUp: sinon.stub()};
+      meeting.trigger = sinon.stub();
+      meeting.webex = webex;
+      meeting.webex.internal.newMetrics.callDiagnosticMetrics =
+      meeting.webex.internal.newMetrics.callDiagnosticMetrics || {};
+      meeting.webex.internal.newMetrics.callDiagnosticMetrics.clearEventLimitsForCorrelationId = sinon.stub();
+    });
+
+    afterEach(() => {
+      sandbox.restore();
+      sinon.restore();
+    });
+
+    describe('#cleanup', () => {
+      it('do clean up on meeting object with LLM enabled', async () => {
+        meeting.config = {enableAutomaticLLM: true};
+        await MeetingUtil.cleanUp(meeting);
+        assert.calledOnce(meeting.cleanupLocalStreams);
+        assert.calledOnce(meeting.closeRemoteStreams);
+        assert.calledOnce(meeting.closePeerConnections);
+        assert.calledOnce(meeting.stopPeriodicLogUpload);
+
+        assert.calledOnce(meeting.unsetRemoteStreams);
+        assert.calledOnce(meeting.unsetPeerConnections);
+        assert.calledOnce(meeting.reconnectionManager.cleanUp);
+        assert.calledOnce(meeting.stopKeepAlive);
+        assert.calledOnce(meeting.updateLLMConnection);
+        assert.calledOnce(meeting.breakouts.cleanUp);
+        assert.calledOnce(meeting.simultaneousInterpretation.cleanUp);
+        assert.calledOnce(webex.internal.device.meetingEnded);
+        assert.calledOnceWithExactly(
+          meeting.webex.internal.newMetrics.callDiagnosticMetrics.clearEventLimitsForCorrelationId,
+          meeting.correlationId
+        );
+      });
+
+      it('do clean up on meeting object with LLM disabled', async () => {
+        meeting.config = {enableAutomaticLLM: false};
+        await MeetingUtil.cleanUp(meeting);
+        assert.calledOnce(meeting.cleanupLocalStreams);
+        assert.calledOnce(meeting.closeRemoteStreams);
+        assert.calledOnce(meeting.closePeerConnections);
+
+        assert.calledOnce(meeting.unsetRemoteStreams);
+        assert.calledOnce(meeting.unsetPeerConnections);
+        assert.calledOnce(meeting.reconnectionManager.cleanUp);
+        assert.calledOnce(meeting.stopKeepAlive);
+        assert.notCalled(meeting.updateLLMConnection);
+        assert.calledOnce(meeting.breakouts.cleanUp);
+        assert.calledOnce(meeting.simultaneousInterpretation.cleanUp);
+        assert.calledOnce(webex.internal.device.meetingEnded);
+        assert.calledOnceWithExactly(
+          meeting.webex.internal.newMetrics.callDiagnosticMetrics.clearEventLimitsForCorrelationId,
+          meeting.correlationId
+        );
+      });
+
+      it('do clean up on meeting object with no config', async () => {
+        await MeetingUtil.cleanUp(meeting);
+        assert.calledOnce(meeting.cleanupLocalStreams);
+        assert.calledOnce(meeting.closeRemoteStreams);
+        assert.calledOnce(meeting.closePeerConnections);
+
+        assert.calledOnce(meeting.unsetRemoteStreams);
+        assert.calledOnce(meeting.unsetPeerConnections);
+        assert.calledOnce(meeting.reconnectionManager.cleanUp);
+        assert.calledOnce(meeting.stopKeepAlive);
+        assert.notCalled(meeting.updateLLMConnection);
+        assert.calledOnce(meeting.breakouts.cleanUp);
+        assert.calledOnce(meeting.simultaneousInterpretation.cleanUp);
+        assert.calledOnce(webex.internal.device.meetingEnded);
+        assert.calledOnceWithExactly(
+          meeting.webex.internal.newMetrics.callDiagnosticMetrics.clearEventLimitsForCorrelationId,
+          meeting.correlationId
+        );
+      });
+    });
+
+    describe('logging', () => {
+      const fakeDevice = sinon.fake.returns({
+        deviceId: 'device-1',
+      });
+
+      const mockStream = {
+        getSettings: fakeDevice,
+      };
+
+      it('#log - should log [info, warn, error, log] to console', () => {
+        LoggerProxy.logger.log('test log');
+        assert.calledOnce(LoggerProxy.logger.log);
+
+        LoggerProxy.logger.info('test info');
+        assert.calledOnce(LoggerProxy.logger.info);
+
+        LoggerProxy.logger.error('test error');
+        assert.calledOnce(LoggerProxy.logger.error);
+
+        LoggerProxy.logger.warn('test warn');
+        assert.calledOnce(LoggerProxy.logger.warn);
+      });
+
+      describe('#handleAudioLogging', () => {
+        it('should not log if called without stream', () => {
+          MeetingUtil.handleAudioLogging();
+          assert(!LoggerProxy.logger.log.called, 'log not called');
+        });
+
+        it('should log audioStream settings', () => {
+          assert(MeetingUtil.handleAudioLogging, 'method is defined');
+          MeetingUtil.handleAudioLogging(mockStream);
+          assert(LoggerProxy.logger.log.called, 'log called');
+        });
+      });
+
+      describe('#handleVideoLogging', () => {
+        it('should not log if called without stream', () => {
+          MeetingUtil.handleVideoLogging(null);
+          assert(!LoggerProxy.logger.log.called, 'log not called');
+        });
+
+        it('should log videoStream settings', () => {
+          assert(MeetingUtil.handleVideoLogging, 'method is defined');
+          MeetingUtil.handleVideoLogging(mockStream);
+          assert(LoggerProxy.logger.log.called, 'log called');
+        });
+      });
+    });
+
+    describe('addSequence', () => {
+      it('should add the sequence object to a request body', () => {
+        const body = {};
+
+        MeetingUtil.addSequence(
+          {
+            locusInfo: {
+              sequence: 'sequence',
+            },
+          },
+          body
+        );
+
+        assert.deepEqual(body, {
+          sequence: 'sequence',
+        });
+      });
+
+      it('should work with an undefined meeting', () => {
+        const body = {};
+
+        MeetingUtil.addSequence(undefined, body);
+
+        assert.deepEqual(body, {});
+      });
+
+      it('should work with an undefined locusInfo', () => {
+        const body = {};
+
+        MeetingUtil.addSequence({}, body);
+
+        assert.deepEqual(body, {});
+      });
+
+      it('should work with an undefined sequence', () => {
+        const body = {};
+
+        MeetingUtil.addSequence({locusInfo: {}}, body);
+
+        assert.deepEqual(body, {});
+      });
+    });
+
+    describe('updateLocusFromApiResponse', () => {
+      it('should call handleLocusAPIResponse with the response body', () => {
+        const meeting = {
+          locusInfo: {
+            handleLocusAPIResponse: sinon.stub(),
+          },
+        };
+
+        const originalResponse = {
+          body: {
+            locus: 'locus',
+          },
+        };
+
+        const response = MeetingUtil.updateLocusFromApiResponse(meeting, originalResponse);
+
+        assert.deepEqual(response, originalResponse);
+        assert.calledOnceWithExactly(meeting.locusInfo.handleLocusAPIResponse, meeting, originalResponse.body);
+      });
+
+      it('should handle locus being missing from the response', () => {
+        const meeting = {
+          locusInfo: {
+            handleLocusAPIResponse: sinon.stub(),
+          },
+        };
+
+        const originalResponse = {
+          body: {},
+        };
+
+        const response = MeetingUtil.updateLocusFromApiResponse(meeting, originalResponse);
+
+        assert.deepEqual(response, originalResponse);
+        assert.notCalled(meeting.locusInfo.handleLocusAPIResponse);
+      });
+
+      it('should work with an undefined meeting', () => {
+        const originalResponse = {
+          body: {
+            locus: 'locus',
+          },
+        };
+
+        const response = MeetingUtil.updateLocusFromApiResponse(undefined, originalResponse);
+        assert.deepEqual(response, originalResponse);
+      });
+    });
+
+    describe('generateLocusDeltaRequest', () => {
+      it('generates the correct wrapper function', async () => {
+        const updateLocusFromApiResponseSpy = sinon.spy(MeetingUtil, 'updateLocusFromApiResponse');
+        const addSequenceSpy = sinon.spy(MeetingUtil, 'addSequence');
+
+        const meeting = {
+          request: sinon.stub().returns(Promise.resolve('result')),
+        };
+
+        const locusDeltaRequest = MeetingUtil.generateLocusDeltaRequest(meeting);
+
+        const options = {
+          some: 'option',
+          body: {},
+        };
+
+        let result = await locusDeltaRequest(options);
+
+        assert.equal(result, 'result');
+        assert.calledOnceWithExactly(updateLocusFromApiResponseSpy, meeting, 'result');
+        assert.calledOnceWithExactly(addSequenceSpy, meeting, options.body);
+
+        updateLocusFromApiResponseSpy.resetHistory();
+        addSequenceSpy.resetHistory();
+
+        // body missing from options
+        result = await locusDeltaRequest({});
+        assert.equal(result, 'result');
+        assert.calledOnceWithExactly(updateLocusFromApiResponseSpy, meeting, 'result');
+        assert.calledOnceWithExactly(addSequenceSpy, meeting, options.body);
+
+        // meeting disappears so the WeakRef returns undefined
+        sinon.stub(WeakRef.prototype, 'deref').returns(undefined);
+
+        result = await locusDeltaRequest(options);
+        assert.equal(result, undefined);
+
+        WeakRef.prototype.deref.restore();
+      });
+
+      it('calls generateBuildLocusDeltaRequestOptions as expected', () => {
+        const generateBuildLocusDeltaRequestOptionsSpy = sinon.spy(
+          MeetingUtil,
+          'generateBuildLocusDeltaRequestOptions'
+        );
+
+        const meeting = {};
+
+        MeetingUtil.generateLocusDeltaRequest(meeting);
+
+        assert.calledOnceWithExactly(generateBuildLocusDeltaRequestOptionsSpy, meeting);
+      });
+    });
+
+    describe('selfSupportsFeature', () => {
+      it('returns true if there are no user policies', () => {
+        assert.equal(
+          MeetingUtil.selfSupportsFeature(SELF_POLICY.SUPPORT_ANNOTATION, undefined),
+          true
+        );
+      });
+
+      it('returns true if policy is true', () => {
+        assert.equal(
+          MeetingUtil.selfSupportsFeature(SELF_POLICY.SUPPORT_ANNOTATION, {
+            [SELF_POLICY.SUPPORT_ANNOTATION]: true,
+          }),
+          true
+        );
+      });
+
+      it('returns false if policy is false', () => {
+        assert.equal(
+          MeetingUtil.selfSupportsFeature(SELF_POLICY.SUPPORT_ANNOTATION, {
+            [SELF_POLICY.SUPPORT_ANNOTATION]: false,
+          }),
+          false
+        );
+      });
+    });
+
+    describe('remoteUpdateAudioVideo', () => {
+      it('#Should call meetingRequest.locusMediaRequest with correct parameters and return the full response', async () => {
+        const fakeResponse = {
+          body: { locus: { url: 'locusUrl'}},
+          headers: { },
+        };
+        const meeting = {
+          id: 'meeting-id',
+          mediaId: '12345',
+          selfUrl: 'self url',
+          locusInfo: {
+            sequence: {},
+          },
+          locusMediaRequest: {
+            send: sinon.stub().resolves(fakeResponse),
+          },
+          getWebexObject: sinon.stub().returns(webex),
+        };
+
+        const result = await MeetingUtil.remoteUpdateAudioVideo(meeting, true, false);
+
+        assert.deepEqual(result, fakeResponse);
+        assert.calledOnceWithExactly(meeting.locusMediaRequest.send, {
+          mediaId: '12345',
+          muteOptions: {
+            audioMuted: true,
+            videoMuted: false,
+          },
+          selfUrl: 'self url',
+          sequence: {},
+          type: 'LocalMute',
+        });
+      });
+    });
+
+    describe('joinMeeting', () => {
+      const joinMeetingResponse = {
+        body: {
+          mediaConnections: [],
+          locus: {
+            url: 'differentLocusUrl',
+            self: {
+              id: 'selfId',
+            },
+          },
+        },
+        headers: {
+          trackingid: 'trackingId',
+        },
+      };
+      let meeting;
+
+      beforeEach(() => {
+        meeting = {
+          meetingJoinUrl: 'meetingJoinUrl',
+          locusUrl: 'locusUrl',
+          meetingRequest: {
+            joinMeeting: sinon.stub().returns(Promise.resolve(joinMeetingResponse)),
+          },
+          getWebexObject: sinon.stub().returns(webex),
+          setLocus: sinon.stub(),
+        };
+      });
+
+      it('#Should call `meetingRequest.joinMeeting', async () => {
+        meeting.isMultistream = true;
+
+        const FAKE_REACHABILITY_REPORT = {
+          id: 'fake reachability report',
+        };
+        const FAKE_CLIENT_MEDIA_PREFERENCES = {
+          id: 'fake client media preferences',
+        };
+
+        webex.meetings.reachability.getReachabilityReportToAttachToRoap.resolves(
+          FAKE_REACHABILITY_REPORT
+        );
+        webex.meetings.reachability.getClientMediaPreferences.resolves(
+          FAKE_CLIENT_MEDIA_PREFERENCES
+        );
+
+        sinon.stub(webex.internal.device.ipNetworkDetector, 'supportsIpV4').get(() => true);
+        sinon.stub(webex.internal.device.ipNetworkDetector, 'supportsIpV6').get(() => true);
+
+        await MeetingUtil.joinMeeting(meeting, {
+          reachability: 'reachability',
+          roapMessage: 'roapMessage',
+        });
+
+        assert.calledOnceWithExactly(
+          webex.meetings.reachability.getReachabilityReportToAttachToRoap
+        );
+        assert.calledOnceWithExactly(
+          webex.meetings.reachability.getClientMediaPreferences,
+          meeting.isMultistream,
+          IP_VERSION.ipv4_and_ipv6
+        );
+
+        assert.calledOnce(meeting.meetingRequest.joinMeeting);
+        const parameter = meeting.meetingRequest.joinMeeting.getCall(0).args[0];
+
+        assert.equal(parameter.inviteeAddress, 'meetingJoinUrl');
+        assert.equal(parameter.reachability, FAKE_REACHABILITY_REPORT);
+        assert.equal(parameter.clientMediaPreferences, FAKE_CLIENT_MEDIA_PREFERENCES);
+        assert.equal(parameter.roapMessage, 'roapMessage');
+
+        assert.calledOnce(meeting.setLocus);
+        const setLocusParameter = meeting.setLocus.getCall(0).args[0];
+        assert.deepEqual(setLocusParameter, MeetingUtil.parseLocusJoin(joinMeetingResponse));
+
+        assert.calledWith(webex.internal.newMetrics.submitClientEvent, {
+          name: 'client.locus.join.request',
+          options: {meetingId: meeting.id},
+        });
+
+        assert.calledWith(webex.internal.newMetrics.submitClientEvent, {
+          name: 'client.locus.join.response',
+          payload: {
+            trigger: 'loci-update',
+            identifiers: {
+              trackingId: 'trackingId',
+            },
+          },
+          options: {
+            meetingId: meeting.id,
+            mediaConnections: [],
+          },
+        });
+      });
+
+      it('#Should call `meetingRequest.joinMeeting and handle a date header in the response : isoLocalClientMeetingJoinedTime', async () => {
+        meeting.isMultistream = true;
+
+        const FAKE_REACHABILITY_REPORT = {
+          id: 'fake reachability report',
+        };
+        const FAKE_CLIENT_MEDIA_PREFERENCES = {
+          id: 'fake client media preferences',
+        };
+
+        webex.meetings.reachability.getReachabilityReportToAttachToRoap.resolves(
+          FAKE_REACHABILITY_REPORT
+        );
+        webex.meetings.reachability.getClientMediaPreferences.resolves(
+          FAKE_CLIENT_MEDIA_PREFERENCES
+        );
+
+        sinon.stub(webex.internal.device.ipNetworkDetector, 'supportsIpV4').get(() => true);
+        sinon.stub(webex.internal.device.ipNetworkDetector, 'supportsIpV6').get(() => true);
+
+        meeting.meetingRequest.joinMeeting.resolves({
+          headers: {
+            date: 'test',
+          },
+          body: {
+            mediaConnections: [{mediaId: 'test'}],
+            locus: {
+              url: 'test',
+              self: {
+                id: 'test',
+              },
+            },
+          },
+        });
+
+        await MeetingUtil.joinMeeting(meeting, {
+          reachability: 'reachability',
+          roapMessage: 'roapMessage',
+        });
+
+        assert.equal(meeting.isoLocalClientMeetingJoinTime, 'test');
+      });
+
+      it('should handle failed reachability report retrieval', async () => {
+        webex.meetings.reachability.getReachabilityReportToAttachToRoap.rejects(
+          new Error('fake error')
+        );
+        await MeetingUtil.joinMeeting(meeting, {});
+        // Verify meeting join still proceeds
+        assert.calledOnce(meeting.meetingRequest.joinMeeting);
+      });
+
+      it('should not attach reachability if there is no roap message', async () => {
+        await MeetingUtil.joinMeeting(meeting, {});
+
+        assert.notCalled(webex.meetings.reachability.getReachabilityReportToAttachToRoap);
+        assert.calledOnce(meeting.meetingRequest.joinMeeting);
+
+        const parameter = meeting.meetingRequest.joinMeeting.getCall(0).args[0];
+        assert.isUndefined(parameter.reachability);
+        assert.isUndefined(parameter.roapMessage);
+      });
+
+      it('should handle failed clientMediaPreferences retrieval', async () => {
+        webex.meetings.reachability.getClientMediaPreferences.rejects(new Error('fake error'));
+        meeting.isMultistream = true;
+        await MeetingUtil.joinMeeting(meeting, {});
+        // Verify meeting join still proceeds
+        assert.calledOnce(meeting.meetingRequest.joinMeeting);
+        const parameter = meeting.meetingRequest.joinMeeting.getCall(0).args[0];
+        assert.deepEqual(parameter.clientMediaPreferences, {
+          preferTranscoding: false,
+          ipver: 0,
+          joinCookie: undefined,
+        });
+      });
+
+      it('#Should call meetingRequest.joinMeeting with breakoutsSupported=true when passed in as true', async () => {
+        await MeetingUtil.joinMeeting(meeting, {
+          breakoutsSupported: true,
+        });
+
+        assert.calledOnce(meeting.meetingRequest.joinMeeting);
+        const parameter = meeting.meetingRequest.joinMeeting.getCall(0).args[0];
+
+        assert.equal(parameter.breakoutsSupported, true);
+      });
+
+      it('#Should call meetingRequest.joinMeeting with liveAnnotationSupported=true when passed in as true', async () => {
+        await MeetingUtil.joinMeeting(meeting, {
+          liveAnnotationSupported: true,
+        });
+
+        assert.calledOnce(meeting.meetingRequest.joinMeeting);
+        const parameter = meeting.meetingRequest.joinMeeting.getCall(0).args[0];
+
+        assert.equal(parameter.liveAnnotationSupported, true);
+      });
+
+      it('#Should call meetingRequest.joinMeeting with alias passed through', async () => {
+        await MeetingUtil.joinMeeting(meeting, {
+          alias: 'alias name',
+        });
+
+        assert.calledOnce(meeting.meetingRequest.joinMeeting);
+        const parameter = meeting.meetingRequest.joinMeeting.getCall(0).args[0];
+
+        assert.equal(parameter.alias, 'alias name');
+      });
+
+      it('#Should call meetingRequest.joinMeeting with locale=en_UK, deviceCapabilities=["TEST"] when they are passed in as those values', async () => {
+        await MeetingUtil.joinMeeting(meeting, {
+          locale: 'en_UK',
+          deviceCapabilities: ['TEST'],
+        });
+
+        assert.calledOnce(meeting.meetingRequest.joinMeeting);
+        const parameter = meeting.meetingRequest.joinMeeting.getCall(0).args[0];
+
+        assert.equal(parameter.locale, 'en_UK');
+        assert.deepEqual(parameter.deviceCapabilities, ['TEST']);
+      });
+
+      it('#Should fallback sipUrl if meetingJoinUrl does not exists', async () => {
+        meeting.meetingJoinUrl = undefined;
+        meeting.sipUri = 'sipUri';
+        await MeetingUtil.joinMeeting(meeting, {});
+
+        assert.calledOnce(meeting.meetingRequest.joinMeeting);
+        const parameter = meeting.meetingRequest.joinMeeting.getCall(0).args[0];
+
+        assert.equal(parameter.inviteeAddress, 'sipUri');
+      });
+
+      it('#Should fallback to meetingNumber if meetingJoinUrl/sipUrl  does not exists', async () => {
+        meeting.meetingJoinUrl = undefined;
+        meeting.meetingNumber = 'meetingNumber';
+        await MeetingUtil.joinMeeting(meeting, {});
+
+        assert.calledOnce(meeting.meetingRequest.joinMeeting);
+        const parameter = meeting.meetingRequest.joinMeeting.getCall(0).args[0];
+
+        assert.isUndefined(parameter.inviteeAddress);
+        assert.equal(parameter.meetingNumber, 'meetingNumber');
+      });
+
+      it('should pass in the locusClusterUrl from meetingInfo', async () => {
+        meeting.meetingInfo = {
+          locusClusterUrl: 'locusClusterUrl',
+        };
+        await MeetingUtil.joinMeeting(meeting, {});
+
+        assert.calledOnce(meeting.meetingRequest.joinMeeting);
+        const parameter = meeting.meetingRequest.joinMeeting.getCall(0).args[0];
+
+        assert.equal(parameter.locusClusterUrl, 'locusClusterUrl');
+      });
+
+      it('should post client event with error when join fails', async () => {
+        const joinError = new Error('Join failed');
+        meeting.meetingRequest.joinMeeting.rejects(joinError);
+        meeting.meetingInfo = { meetingLookupUrl: 'test-lookup-url' };
+
+        try {
+          await MeetingUtil.joinMeeting(meeting, {});
+          assert.fail('Expected joinMeeting to throw an error');
+        } catch (error) {
+          assert.equal(error, joinError);
+          
+          // Verify error client event was submitted
+          assert.calledWith(webex.internal.newMetrics.submitClientEvent, {
+            name: 'client.locus.join.response',
+            payload: {
+              identifiers: { meetingLookupUrl: 'test-lookup-url' },
+            },
+            options: { meetingId: meeting.id, rawError: joinError },
+          });
+        }
+      });
+    });
+
+    describe('joinMeetingOptions', () => {
+      it('sends client events correctly', async () => {
+        const joinMeetingSpy = sinon.stub(MeetingUtil, 'joinMeeting').rejects({});
+        MeetingUtil.isPinOrGuest = sinon.stub().returns(true);
+        const meeting = {
+          id: 'meeting-id',
+          mediaId: '12345',
+          selfUrl: 'self url',
+          locusInfo: {
+            sequence: {},
+          },
+          locusMediaRequest: {
+            send: sinon.stub().resolves({body: {}, headers: {}}),
+          },
+          getWebexObject: sinon.stub().returns(webex),
+        };
+
+        try {
+          await MeetingUtil.joinMeetingOptions(meeting, {pin: true});
+
+          assert.calledWith(webex.internal.newMetrics.submitClientEvent, {
+            name: 'client.pin.collected',
+            options: {
+              meetingId: meeting.id,
+            },
+          });
+        } catch (err) {
+          assert.calledWith(webex.internal.newMetrics.submitClientEvent, {
+            name: 'client.pin.prompt',
+            options: {
+              meetingId: meeting.id,
+            },
+          });
+        } finally {
+          joinMeetingSpy.restore();
+        }
+      });
+
+      it('should submit client event and reject with PasswordError when password is required', async () => {
+        const meeting = {
+          id: 'meeting-id',
+          passwordStatus: PASSWORD_STATUS.REQUIRED,
+          resourceId: null,
+          requiredCaptcha: null,
+          getWebexObject: sinon.stub().returns(webex),
+        };
+
+        try {
+          await MeetingUtil.joinMeetingOptions(meeting, {});
+          assert.fail('Expected joinMeetingOptions to throw PasswordError');
+        } catch (error) {
+          assert.instanceOf(error, PasswordError);
+          
+          // Verify client event was submitted with error details
+          assert.calledWith(webex.internal.newMetrics.submitClientEvent, {
+            name: 'client.meetinginfo.response',
+            options: {
+              meetingId: meeting.id,
+            },
+            payload: {
+              errors: [
+                {
+                  fatal: false,
+                  category: 'expected',
+                  name: 'other',
+                  shownToUser: false,
+                  errorCode: error.code,
+                  errorDescription: error.name,
+                  rawErrorMessage: error.sdkMessage,
+                },
+              ],
+            },
+          });
+        }
+      });
+
+      it('should submit client event and reject with CaptchaError when captcha is required', async () => {
+        const meeting = {
+          id: 'meeting-id',
+          passwordStatus: null,
+          resourceId: null,
+          requiredCaptcha: {captchaId: 'test-captcha'},
+          getWebexObject: sinon.stub().returns(webex),
+        };
+
+        try {
+          await MeetingUtil.joinMeetingOptions(meeting, {});
+          assert.fail('Expected joinMeetingOptions to throw CaptchaError');
+        } catch (error) {
+          assert.instanceOf(error, CaptchaError);
+          
+          // Verify client event was submitted with error details
+          assert.calledWith(webex.internal.newMetrics.submitClientEvent, {
+            name: 'client.meetinginfo.response',
+            options: {
+              meetingId: meeting.id,
+            },
+            payload: {
+              errors: [
+                {
+                  fatal: false,
+                  category: 'expected',
+                  name: 'other',
+                  shownToUser: false,
+                  errorCode: error.code,
+                  errorDescription: error.name,
+                  rawErrorMessage: error.sdkMessage,
+                },
+              ],
+            },
+          });
+        }
+      });
+    });
+
+    describe('getUserDisplayHintsFromLocusInfo', () => {
+      it('returns display hints', () => {
+        assert.deepEqual(MeetingUtil.getUserDisplayHintsFromLocusInfo(), []);
+
+        assert.deepEqual(MeetingUtil.getUserDisplayHintsFromLocusInfo({}), []);
+
+        assert.deepEqual(MeetingUtil.getUserDisplayHintsFromLocusInfo({parsedLocus: {}}), []);
+
+        assert.deepEqual(
+          MeetingUtil.getUserDisplayHintsFromLocusInfo({parsedLocus: {info: {}}}),
+          []
+        );
+
+        assert.deepEqual(
+          MeetingUtil.getUserDisplayHintsFromLocusInfo({
+            parsedLocus: {info: {userDisplayHints: []}},
+          }),
+          []
+        );
+
+        assert.deepEqual(
+          MeetingUtil.getUserDisplayHintsFromLocusInfo({
+            parsedLocus: {
+              info: {
+                userDisplayHints: ['HINT_1'],
+              },
+            },
+          }),
+          ['HINT_1']
+        );
+      });
+    });
+
+    describe('canInviteNewParticipants', () => {
+      it('works as expected', () => {
+        assert.deepEqual(MeetingUtil.canInviteNewParticipants(['ADD_GUEST']), true);
+        assert.deepEqual(MeetingUtil.canInviteNewParticipants([]), false);
+      });
+    });
+
+    describe('canAdmitParticipant', () => {
+      it('works as expected', () => {
+        assert.deepEqual(MeetingUtil.canAdmitParticipant(['ROSTER_WAITING_TO_JOIN']), true);
+        assert.deepEqual(MeetingUtil.canAdmitParticipant([]), false);
+      });
+    });
+
+    describe('canUserRaiseHand', () => {
+      it('works as expected', () => {
+        assert.deepEqual(MeetingUtil.canUserRaiseHand(['RAISE_HAND']), true);
+        assert.deepEqual(MeetingUtil.canUserRaiseHand([]), false);
+      });
+    });
+
+    describe('canUserLowerAllHands', () => {
+      it('works as expected', () => {
+        assert.deepEqual(MeetingUtil.canUserLowerAllHands(['LOWER_ALL_HANDS']), true);
+        assert.deepEqual(MeetingUtil.canUserLowerAllHands([]), false);
+      });
+    });
+
+    describe('canUserLowerSomeoneElsesHand', () => {
+      it('works as expected', () => {
+        assert.deepEqual(
+          MeetingUtil.canUserLowerSomeoneElsesHand(['LOWER_SOMEONE_ELSES_HAND']),
+          true
+        );
+        assert.deepEqual(MeetingUtil.canUserLowerSomeoneElsesHand([]), false);
+      });
+    });
+
+    describe('canUserRenameSelfAndObserved', () => {
+      it('works as expected', () => {
+        assert.deepEqual(
+          MeetingUtil.canUserRenameSelfAndObserved(['CAN_RENAME_SELF_AND_OBSERVED']),
+          true
+        );
+        assert.deepEqual(MeetingUtil.canUserRenameSelfAndObserved([]), false);
+      });
+    });
+
+    describe('requiresPostMeetingDataConsentPrompt', () => {
+      it('works as expected', () => {
+        assert.deepEqual(
+          MeetingUtil.requiresPostMeetingDataConsentPrompt([
+            'SHOW_POST_MEETING_DATA_CONSENT_PROMPT',
+          ]),
+          true
+        );
+        assert.deepEqual(MeetingUtil.requiresPostMeetingDataConsentPrompt([]), false);
+      });
+    });
+
+    describe('canUserRenameOthers', () => {
+      it('works as expected', () => {
+        assert.deepEqual(MeetingUtil.canUserRenameOthers(['CAN_RENAME_OTHERS']), true);
+        assert.deepEqual(MeetingUtil.canUserRenameOthers([]), false);
+      });
+    });
+
+    describe('canShareWhiteBoard', () => {
+      it('works as expected', () => {
+        assert.deepEqual(
+          MeetingUtil.canShareWhiteBoard(['SHARE_WHITEBOARD'], {
+            [SELF_POLICY.SUPPORT_WHITEBOARD]: true,
+          }),
+          true
+        );
+        assert.deepEqual(
+          MeetingUtil.canShareWhiteBoard([], {
+            [SELF_POLICY.SUPPORT_WHITEBOARD]: true,
+          }),
+          false
+        );
+        assert.deepEqual(
+          MeetingUtil.canShareWhiteBoard(['SHARE_WHITEBOARD'], {
+            [SELF_POLICY.SUPPORT_WHITEBOARD]: false,
+          }),
+          false
+        );
+        assert.deepEqual(
+          MeetingUtil.canShareWhiteBoard([], {
+            [SELF_POLICY.SUPPORT_WHITEBOARD]: false,
+          }),
+          false
+        );
+        assert.deepEqual(MeetingUtil.canShareWhiteBoard(['SHARE_WHITEBOARD'], undefined), false);
+      });
+    });
+
+    describe('canMoveToLobby', () => {
+      it('works as expected', () => {
+        assert.deepEqual(MeetingUtil.canMoveToLobby(['MOVE_TO_LOBBY']), true);
+        assert.deepEqual(MeetingUtil.canMoveToLobby([]), false);
+      });
+    });
+
+    describe('bothLeaveAndEndMeetingAvailable', () => {
+      it('works as expected', () => {
+        assert.deepEqual(
+          MeetingUtil.bothLeaveAndEndMeetingAvailable(['LEAVE_TRANSFER_HOST_END_MEETING']),
+          true
+        );
+        assert.deepEqual(MeetingUtil.bothLeaveAndEndMeetingAvailable(['LEAVE_END_MEETING']), true);
+        assert.deepEqual(
+          MeetingUtil.bothLeaveAndEndMeetingAvailable([
+            'LEAVE_TRANSFER_HOST_END_MEETING',
+            'LEAVE_END_MEETING',
+          ]),
+          true
+        );
+        assert.deepEqual(MeetingUtil.bothLeaveAndEndMeetingAvailable([]), false);
+      });
+    });
+
+    describe('canUserLock', () => {
+      it('works as expected', () => {
+        assert.deepEqual(
+          MeetingUtil.canUserLock(['LOCK_CONTROL_LOCK', 'LOCK_STATUS_UNLOCKED']),
+          true
+        );
+        assert.deepEqual(MeetingUtil.canUserLock(['LOCK_CONTROL_LOCK']), false);
+        assert.deepEqual(MeetingUtil.canUserLock(['LOCK_STATUS_UNLOCKED']), false);
+        assert.deepEqual(MeetingUtil.canUserLock([]), false);
+      });
+    });
+
+    describe('canUserUnlock', () => {
+      it('works as expected', () => {
+        assert.deepEqual(
+          MeetingUtil.canUserUnlock(['LOCK_CONTROL_UNLOCK', 'LOCK_STATUS_LOCKED']),
+          true
+        );
+        assert.deepEqual(MeetingUtil.canUserUnlock(['LOCK_CONTROL_UNLOCK']), false);
+        assert.deepEqual(MeetingUtil.canUserUnlock(['LOCK_STATUS_LOCKED']), false);
+        assert.deepEqual(MeetingUtil.canUserUnlock([]), false);
+      });
+    });
+
+    [
+      {functionName: 'isSaveTranscriptsEnabled', displayHint: 'SAVE_TRANSCRIPTS_ENABLED'},
+      {functionName: 'canEnableClosedCaption', displayHint: 'CAPTION_START'},
+      {functionName: 'canStartTranscribing', displayHint: 'TRANSCRIPTION_CONTROL_START'},
+      {functionName: 'canStopTranscribing', displayHint: 'TRANSCRIPTION_CONTROL_STOP'},
+      {functionName: 'isClosedCaptionActive', displayHint: 'CAPTION_STATUS_ACTIVE'},
+      {functionName: 'canStartManualCaption', displayHint: 'MANUAL_CAPTION_START'},
+      {functionName: 'canStopManualCaption', displayHint: 'MANUAL_CAPTION_STOP'},
+
+      {functionName: 'isLocalRecordingStarted',displayHint:'LOCAL_RECORDING_STATUS_STARTED'},
+      {functionName: 'isLocalRecordingStopped', displayHint: 'LOCAL_RECORDING_STATUS_STOPPED'},
+      {functionName: 'isLocalRecordingPaused', displayHint: 'LOCAL_RECORDING_STATUS_PAUSED'},
+      {functionName: 'isLocalStreamingStarted',displayHint:'STREAMING_STATUS_STARTED'},
+      {functionName: 'isLocalStreamingStopped', displayHint: 'STREAMING_STATUS_STOPPED'},
+
+      {functionName: 'isManualCaptionActive', displayHint: 'MANUAL_CAPTION_STATUS_ACTIVE'},
+
+      {functionName: 'isSpokenLanguageAutoDetectionEnabled', displayHint: 'SPOKEN_LANGUAGE_AUTO_DETECTION_ENABLED'},
+
+      {functionName: 'isWebexAssistantActive', displayHint: 'WEBEX_ASSISTANT_STATUS_ACTIVE'},
+      {functionName: 'canViewCaptionPanel', displayHint: 'ENABLE_CAPTION_PANEL'},
+      {functionName: 'isRealTimeTranslationEnabled', displayHint: 'DISPLAY_REAL_TIME_TRANSLATION'},
+      {functionName: 'canSelectSpokenLanguages', displayHint: 'DISPLAY_NON_ENGLISH_ASR'},
+      {functionName: 'waitingForOthersToJoin', displayHint: 'WAITING_FOR_OTHERS'},
+      {functionName: 'showAutoEndMeetingWarning', displayHint: 'SHOW_AUTO_END_MEETING_WARNING'},
+    ].forEach(({functionName, displayHint}) => {
+      describe(functionName, () => {
+        it('works as expected', () => {
+          assert.deepEqual(MeetingUtil[functionName]([displayHint]), true);
+          assert.deepEqual(MeetingUtil[functionName]([]), false);
+        });
+      });
+    });
+
+    describe('canManageBreakout', () => {
+      it('works as expected', () => {
+        assert.deepEqual(MeetingUtil.canManageBreakout(['BREAKOUT_MANAGEMENT']), true);
+        assert.deepEqual(MeetingUtil.canManageBreakout([]), false);
+      });
+    });
+
+    describe('canStartBreakout', () => {
+      it('works as expected', () => {
+        assert.deepEqual(MeetingUtil.canStartBreakout(['DISABLE_BREAKOUT_START']), false);
+        assert.deepEqual(MeetingUtil.canStartBreakout([]), true);
+      });
+    });
+
+    describe('canBroadcastMessageToBreakout', () => {
+      it('works as expected', () => {
+        assert.deepEqual(
+          MeetingUtil.canBroadcastMessageToBreakout(['BROADCAST_MESSAGE_TO_BREAKOUT'], {
+            [SELF_POLICY.SUPPORT_BROADCAST_MESSAGE]: true,
+          }),
+          true
+        );
+        assert.deepEqual(
+          MeetingUtil.canBroadcastMessageToBreakout([], {
+            [SELF_POLICY.SUPPORT_BROADCAST_MESSAGE]: true,
+          }),
+          false
+        );
+        assert.deepEqual(
+          MeetingUtil.canBroadcastMessageToBreakout(['BROADCAST_MESSAGE_TO_BREAKOUT'], {
+            [SELF_POLICY.SUPPORT_BROADCAST_MESSAGE]: false,
+          }),
+          false
+        );
+        assert.deepEqual(
+          MeetingUtil.canBroadcastMessageToBreakout(['BROADCAST_MESSAGE_TO_BREAKOUT'], undefined),
+          false
+        );
+      });
+    });
+
+    describe('isSuppressBreakoutSupport', () => {
+      it('works as expected', () => {
+        assert.deepEqual(
+          MeetingUtil.isSuppressBreakoutSupport(['UCF_SUPPRESS_BREAKOUTS_SUPPORT']),
+          true
+        );
+        assert.deepEqual(MeetingUtil.isSuppressBreakoutSupport([]), false);
+      });
+    });
+
+    describe('canAdmitLobbyToBreakout', () => {
+      it('works as expected', () => {
+        assert.deepEqual(MeetingUtil.canAdmitLobbyToBreakout(['DISABLE_LOBBY_TO_BREAKOUT']), false);
+        assert.deepEqual(MeetingUtil.canAdmitLobbyToBreakout([]), true);
+      });
+    });
+
+    describe('canUserAskForHelp', () => {
+      it('works as expected', () => {
+        assert.deepEqual(MeetingUtil.canUserAskForHelp(['DISABLE_ASK_FOR_HELP']), false);
+        assert.deepEqual(MeetingUtil.canUserAskForHelp([]), true);
+      });
+    });
+
+    describe('isBreakoutPreassignmentsEnabled', () => {
+      it('works as expected', () => {
+        assert.deepEqual(
+          MeetingUtil.isBreakoutPreassignmentsEnabled(['DISABLE_BREAKOUT_PREASSIGNMENTS']),
+          false
+        );
+        assert.deepEqual(MeetingUtil.isBreakoutPreassignmentsEnabled([]), true);
+      });
+    });
+
+    describe('parseInterpretationInfo', () => {
+      let meetingInfo = {};
+      beforeEach(() => {
+        meeting.simultaneousInterpretation = {
+          updateMeetingSIEnabled: sinon.stub(),
+          updateHostSIEnabled: sinon.stub(),
+          updateInterpretation: sinon.stub(),
+          siLanguages: [],
+        };
+      });
+      it('should update simultaneous interpretation settings with SI and host enabled', () => {
+        meetingInfo.turnOnSimultaneousInterpretation = true;
+        meetingInfo.meetingSiteSetting = {
+          enableHostInterpreterControlSI: true,
+        };
+        meetingInfo.simultaneousInterpretation = {
+          currentSIInterpreter: true,
+          siLanguages: [
+            {languageCode: 'en', languageGroupId: 1},
+            {languageCode: 'es', languageGroupId: 2},
+          ],
+        };
+
+        MeetingUtil.parseInterpretationInfo(meeting, meetingInfo);
+        assert.calledWith(meeting.simultaneousInterpretation.updateMeetingSIEnabled, true, true);
+        assert.calledWith(meeting.simultaneousInterpretation.updateHostSIEnabled, true);
+        assert.calledWith(meeting.simultaneousInterpretation.updateInterpretation, {
+          siLanguages: [
+            {languageName: 'en', languageCode: 1},
+            {languageName: 'es', languageCode: 2},
+          ],
+        });
+      });
+
+      it('should update simultaneous interpretation settings with host SI disabled', () => {
+        meetingInfo.meetingSiteSetting.enableHostInterpreterControlSI = false;
+        meetingInfo.simultaneousInterpretation.currentSIInterpreter = false;
+        MeetingUtil.parseInterpretationInfo(meeting, meetingInfo);
+        assert.calledWith(meeting.simultaneousInterpretation.updateMeetingSIEnabled, true, false);
+        assert.calledWith(meeting.simultaneousInterpretation.updateHostSIEnabled, false);
+        assert.calledWith(meeting.simultaneousInterpretation.updateInterpretation, {
+          siLanguages: [
+            {languageName: 'en', languageCode: 1},
+            {languageName: 'es', languageCode: 2},
+          ],
+        });
+      });
+      it('should update simultaneous interpretation settings with SI disabled', () => {
+        meetingInfo.turnOnSimultaneousInterpretation = false;
+        MeetingUtil.parseInterpretationInfo(meeting, meetingInfo);
+        assert.calledWith(meeting.simultaneousInterpretation.updateMeetingSIEnabled, false, false);
+        assert.calledWith(meeting.simultaneousInterpretation.updateHostSIEnabled, false);
+      });
+
+      it('should not update simultaneous interpretation settings for invalid input', () => {
+        // Call the function with invalid inputs
+        MeetingUtil.parseInterpretationInfo(null, null);
+
+        // Ensure that the update functions are not called
+        assert.notCalled(meeting.simultaneousInterpretation.updateMeetingSIEnabled);
+        assert.notCalled(meeting.simultaneousInterpretation.updateHostSIEnabled);
+        assert.notCalled(meeting.simultaneousInterpretation.updateInterpretation);
+      });
+    });
+
+    describe('prepareLeaveMeetingOptions', () => {
+      it('works as expected', () => {
+        const meeting = {
+          locusUrl: 'locusUrl',
+          selfId: 'selfId',
+          correlationId: 'correlationId',
+          resourceId: 'resourceId',
+          deviceUrl: 'deviceUrl',
+        };
+
+        const leaveOptions = MeetingUtil.prepareLeaveMeetingOptions(meeting, {
+          selfId: 'bob',
+          foo: 'bar',
+        });
+
+        assert.deepEqual(leaveOptions, {
+          correlationId: 'correlationId',
+          deviceUrl: 'deviceUrl',
+          foo: 'bar',
+          locusUrl: 'locusUrl',
+          resourceId: 'resourceId',
+          selfId: 'bob',
+        });
+      });
+    });
+
+    describe('leaveMeeting', () => {
+      it('calls prepareLeaveMeetingOptions as expected', () => {
+        const meeting = {
+          locusUrl: 'locusUrl',
+          selfId: 'selfId',
+          correlationId: 'correlationId',
+          resourceId: 'resourceId',
+          deviceUrl: 'deviceUrl',
+          locusInfo: {parsedLocus: {}},
+          meetingRequest: {
+            leaveMeeting: () => Promise.resolve(),
+          },
+        };
+
+        const prepareLeaveMeetingOptionsSpy = sinon.spy(MeetingUtil, 'prepareLeaveMeetingOptions');
+
+        MeetingUtil.leaveMeeting(meeting, {foo: 'bar'});
+
+        assert.calledOnce(prepareLeaveMeetingOptionsSpy);
+        assert.deepEqual(prepareLeaveMeetingOptionsSpy.getCall(0).args[0], meeting);
+        assert.deepEqual(prepareLeaveMeetingOptionsSpy.getCall(0).args[1], {foo: 'bar'});
+      });
+    });
+
+    describe('buildLeaveFetchRequestOptions', () => {
+      it('calls expected functions', () => {
+        const buildLeaveMeetingRequestOptionsSpy = sinon.stub();
+
+        const meeting = {
+          locusUrl: 'locusUrl',
+          selfId: 'selfId',
+          correlationId: 'correlationId',
+          resourceId: 'resourceId',
+          deviceUrl: 'deviceUrl',
+          meetingRequest: {
+            leaveMeeting: () => Promise.resolve(),
+            buildLeaveMeetingRequestOptions: buildLeaveMeetingRequestOptionsSpy,
+          },
+        };
+
+        const prepareLeaveMeetingOptionsSpy = sinon.spy(MeetingUtil, 'prepareLeaveMeetingOptions');
+
+        const options = MeetingUtil.buildLeaveFetchRequestOptions(meeting, {foo: 'bar'});
+
+        assert.calledOnce(prepareLeaveMeetingOptionsSpy);
+        assert.deepEqual(prepareLeaveMeetingOptionsSpy.getCall(0).args[0], meeting);
+        assert.deepEqual(prepareLeaveMeetingOptionsSpy.getCall(0).args[1], {foo: 'bar'});
+
+        assert.calledOnce(buildLeaveMeetingRequestOptionsSpy);
+        assert.deepEqual(buildLeaveMeetingRequestOptionsSpy.getCall(0).args[0], {
+          correlationId: 'correlationId',
+          deviceUrl: 'deviceUrl',
+          foo: 'bar',
+          locusUrl: 'locusUrl',
+          resourceId: 'resourceId',
+          selfId: 'selfId',
+        });
+      });
+    });
+
+    describe('generateBuildLocusDeltaRequestOptions', () => {
+      it('generates the correct wrapper function', async () => {
+        const addSequenceSpy = sinon.spy(MeetingUtil, 'addSequence');
+
+        const meeting = {locusInfo: {sequence: 123}};
+
+        const buildLocusDeltaRequestOptions =
+          MeetingUtil.generateBuildLocusDeltaRequestOptions(meeting);
+
+        let result = buildLocusDeltaRequestOptions({
+          some: 'option',
+          body: {},
+        });
+        assert.deepEqual(result, {some: 'option', body: {sequence: 123}});
+        assert.calledOnceWithExactly(addSequenceSpy, meeting, {sequence: 123});
+
+        addSequenceSpy.resetHistory();
+
+        // body missing from options
+        result = buildLocusDeltaRequestOptions({});
+        assert.deepEqual(result, {body: {sequence: 123}});
+        assert.calledOnceWithExactly(addSequenceSpy, meeting, {sequence: 123});
+
+        // meeting disappears so the WeakRef returns undefined
+        sinon.stub(WeakRef.prototype, 'deref').returns(undefined);
+
+        const input = {foo: 'bar'};
+        result = buildLocusDeltaRequestOptions(input);
+        assert.equal(result, input);
+      });
+    });
+
+    describe('getIpVersion', () => {
+      let isBrowserStub;
+      beforeEach(() => {
+        isBrowserStub = sinon.stub().returns(false);
+
+        sinon.stub(BrowserDetectionModule, 'default').returns({
+          isBrowser: isBrowserStub,
+        });
+      });
+
+      afterEach(() => {
+        sinon.restore();
+      });
+
+      [
+        {supportsIpV4: undefined, supportsIpV6: undefined, expectedOutput: IP_VERSION.unknown},
+        {supportsIpV4: undefined, supportsIpV6: true, expectedOutput: IP_VERSION.only_ipv6},
+        {supportsIpV4: undefined, supportsIpV6: false, expectedOutput: IP_VERSION.unknown},
+        {supportsIpV4: true, supportsIpV6: undefined, expectedOutput: IP_VERSION.only_ipv4},
+        {supportsIpV4: true, supportsIpV6: true, expectedOutput: IP_VERSION.ipv4_and_ipv6},
+        {supportsIpV4: true, supportsIpV6: false, expectedOutput: IP_VERSION.only_ipv4},
+        {supportsIpV4: false, supportsIpV6: undefined, expectedOutput: IP_VERSION.unknown},
+        {supportsIpV4: false, supportsIpV6: true, expectedOutput: IP_VERSION.only_ipv6},
+        {supportsIpV4: false, supportsIpV6: false, expectedOutput: IP_VERSION.unknown},
+      ].forEach(({supportsIpV4, supportsIpV6, expectedOutput}) => {
+        it(`returns ${expectedOutput} when supportsIpV4=${supportsIpV4} and supportsIpV6=${supportsIpV6}`, () => {
+          sinon
+            .stub(webex.internal.device.ipNetworkDetector, 'supportsIpV4')
+            .get(() => supportsIpV4);
+          sinon
+            .stub(webex.internal.device.ipNetworkDetector, 'supportsIpV6')
+            .get(() => supportsIpV6);
+
+          assert.equal(MeetingUtil.getIpVersion(webex), expectedOutput);
+        });
+
+        it(`returns ${expectedOutput} when supportsIpV4=${supportsIpV4} and supportsIpV6=${supportsIpV6} for Firefox if config is enabled`, () => {
+          sinon
+            .stub(webex.internal.device.ipNetworkDetector, 'supportsIpV4')
+            .get(() => supportsIpV4);
+          sinon
+            .stub(webex.internal.device.ipNetworkDetector, 'supportsIpV6')
+            .get(() => supportsIpV6);
+
+          webex.config.meetings.backendIpv6NativeSupport = true;
+          isBrowserStub.callsFake((name) => name === 'firefox');
+
+          assert.equal(MeetingUtil.getIpVersion(webex), expectedOutput);
+        });
+
+        it(`returns undefined when supportsIpV4=${supportsIpV4} and supportsIpV6=${supportsIpV6}, config disabled and browser is firefox`, () => {
+          sinon
+            .stub(webex.internal.device.ipNetworkDetector, 'supportsIpV4')
+            .get(() => supportsIpV4);
+          sinon
+            .stub(webex.internal.device.ipNetworkDetector, 'supportsIpV6')
+            .get(() => supportsIpV6);
+
+          webex.config.meetings.backendIpv6NativeSupport = false;
+          isBrowserStub.callsFake((name) => name === 'firefox');
+
+          assert.equal(MeetingUtil.getIpVersion(webex), undefined);
+        });
+      });
+    });
+
+    describe('getCaEventLabelsForIpVersion', () => {
+      [
+        {ipver: IP_VERSION.unknown, expectedLabels: undefined},
+        {ipver: IP_VERSION.only_ipv4, expectedLabels: ['hasIpv4_true']},
+        {ipver: IP_VERSION.only_ipv6, expectedLabels: ['hasIpv6_true']},
+        {
+          ipver: IP_VERSION.ipv4_and_ipv6,
+          expectedLabels: ['hasIpv4_true', 'hasIpv6_true'],
+        },
+      ].forEach(({ipver, expectedLabels}) => {
+        it(`returns expected labels when ipver=${ipver}`, () => {
+          sinon.stub(MeetingUtil, 'getIpVersion').returns(ipver);
+
+          const result = MeetingUtil.getCaEventLabelsForIpVersion(webex);
+
+          assert.calledOnceWithExactly(MeetingUtil.getIpVersion, webex);
+          assert.deepEqual(result, expectedLabels);
+        });
+      });
+    });
+
+    describe('getChangeMeetingFloorErrorPayload', () => {
+      [
+        {
+          reason: LOCAL_SHARE_ERRORS.UNDEFINED,
+          expected: {
+            category: 'signaling',
+            errorCode: 1100,
+          },
+        },
+        {
+          reason: LOCAL_SHARE_ERRORS.DEVICE_NOT_JOINED,
+          expected: {
+            category: 'signaling',
+            errorCode: 4050,
+          },
+        },
+        {
+          reason: LOCAL_SHARE_ERRORS.NO_MEDIA_FOR_DEVICE,
+          expected: {
+            category: 'media',
+            errorCode: 2048,
+          },
+        },
+        {
+          reason: LOCAL_SHARE_ERRORS.NO_CONFLUENCE_ID,
+          expected: {
+            category: 'signaling',
+            errorCode: 4064,
+          },
+        },
+        {
+          reason: LOCAL_SHARE_ERRORS.CONTENT_SHARING_DISABLED,
+          expected: {
+            category: 'expected',
+            errorCode: 4065,
+          },
+        },
+        {
+          reason: LOCAL_SHARE_ERRORS.LOCUS_PARTICIPANT_DNE,
+          expected: {
+            category: 'signaling',
+            errorCode: 4066,
+          },
+        },
+        {
+          reason: LOCAL_SHARE_ERRORS.CONTENT_REQUEST_WHILE_PENDING_WHITEBOARD,
+          expected: {
+            category: 'expected',
+            errorCode: 4067,
+          },
+        },
+        {
+          reason: 'some unknown reason',
+          expected: {
+            category: 'signaling',
+            errorCode: 1100,
+          },
+        },
+      ].forEach(({reason, expected}) => {
+        const expectedFull = {
+          errorDescription: reason,
+          name: 'locus.response',
+          shownToUser: false,
+          fatal: true,
+          ...expected,
+        };
+        it(`returns expected when reason="${reason}"`, () => {
+          const result = MeetingUtil.getChangeMeetingFloorErrorPayload(reason);
+          assert.equal(result.length, 1);
+
+          const error = result[0];
+          assert.deepEqual(error, expectedFull);
+        });
+      });
+
+      it('properly handles "includes"', () => {
+        const reason = '>>> ' + LOCAL_SHARE_ERRORS.DEVICE_NOT_JOINED + ' <<<';
+        const result = MeetingUtil.getChangeMeetingFloorErrorPayload(reason);
+        assert.equal(result.length, 1);
+
+        const error = result[0];
+        assert.deepEqual(error, {
+          category: 'signaling',
+          errorCode: 4050,
+          errorDescription: reason,
+          name: 'locus.response',
+          shownToUser: false,
+          fatal: true,
+        });
+      });
+    });
+
+    describe('#parseLocusJoin', () => {
+      let response;
+
+      beforeEach(() => {
+        response = {
+          body: {
+            locus: {
+              url: 'https://locus-a.wbx2.com/locus/api/v1/loci/12345',
+              self: {
+                id: 'selfId123',
+              },
+            },
+            dataSets: [{name: 'dataset1', url: 'http://dataset.com'}],
+            mediaConnections: [
+              {mediaId: 'mediaId456'},
+              {someOtherField: 'value'},
+            ],
+          },
+        };
+      });
+
+      it('works as expected', () => {
+        const result = MeetingUtil.parseLocusJoin(response);
+
+        assert.deepEqual(result, {
+          locus: response.body.locus,
+          dataSets: response.body.dataSets,
+          mediaConnections: response.body.mediaConnections,
+          locusUrl: 'https://locus-a.wbx2.com/locus/api/v1/loci/12345',
+          locusId: '12345',
+          selfId: 'selfId123',
+          mediaId: 'mediaId456',
+        });
+      });
+
+      it('extracts mediaId from the last mediaConnection that has it', () => {
+        response.body.mediaConnections = [
+          {someField: 'noMediaId'},
+          {mediaId: 'firstMediaId'},
+          {mediaId: 'secondMediaId'},
+        ];
+
+        const result = MeetingUtil.parseLocusJoin(response);
+
+        // Note: the implementation uses forEach which doesn't break,
+        // so it will use the last mediaId found, not the first
+        assert.equal(result.mediaId, 'secondMediaId');
+      });
+
+      it('handles empty mediaConnections array', () => {
+        response.body.mediaConnections = [];
+
+        const result = MeetingUtil.parseLocusJoin(response);
+
+        assert.deepEqual(result, {
+          locus: response.body.locus,
+          dataSets: response.body.dataSets,
+          mediaConnections: [],
+          locusUrl: 'https://locus-a.wbx2.com/locus/api/v1/loci/12345',
+          locusId: '12345',
+          selfId: 'selfId123',
+        });
+        assert.isUndefined(result.mediaId);
+      });
+
+      it('handles mediaConnections without mediaId', () => {
+        response.body.mediaConnections = [
+          {someField: 'value1'},
+          {anotherField: 'value2'},
+        ];
+
+        const result = MeetingUtil.parseLocusJoin(response);
+
+        assert.isUndefined(result.mediaId);
+      });
+    });
+  });
+});

@@ -11,7 +11,7 @@ export async function waitForWebexAdmission(
   log("Waiting for Webex admission...");
 
   // Check current status
-  const initialStatus = await page.evaluate(() => window.__WEBEX_STATUS);
+  const initialStatus = await page.evaluate(() => (window as any).__WEBEX_STATUS);
 
   // If already joined, we're immediately admitted (no lobby)
   if (initialStatus.joined) {
@@ -45,7 +45,7 @@ export async function waitForWebexAdmission(
   try {
     await page.waitForFunction(
       () => {
-        const status = window.__WEBEX_STATUS;
+        const status = (window as any).__WEBEX_STATUS;
         // Check for joined state or error
         if (status.joined) return true;
         if (status.error) return true;
@@ -66,7 +66,7 @@ export async function waitForWebexAdmission(
   }
 
   // Get final status
-  const finalStatus = await page.evaluate(() => window.__WEBEX_STATUS);
+  const finalStatus = await page.evaluate(() => (window as any).__WEBEX_STATUS);
 
   // Check for rejection
   if (finalStatus.meetingState === "REJECTED") {
@@ -94,7 +94,7 @@ export async function waitForWebexAdmission(
 export async function checkForWebexAdmissionSilent(page: Page): Promise<boolean> {
   // Silent check without callbacks
   try {
-    const status = await page.evaluate(() => window.__WEBEX_STATUS);
+    const status = await page.evaluate(() => (window as any).__WEBEX_STATUS);
     return status.joined === true;
   } catch (err) {
     log(`Error during silent admission check: ${err}`);

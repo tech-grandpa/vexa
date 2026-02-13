@@ -1,0 +1,272 @@
+/*!
+ * Copyright (c) 2015-2020 Cisco Systems, Inc. See LICENSE file.
+ */
+
+/* eslint-disable camelcase */
+
+import sinon from 'sinon';
+import {assert} from '@webex/test-helper-chai';
+import MockWebex from '@webex/test-helper-mock-webex';
+import {RedirectInterceptor, config, Credentials} from '@webex/webex-core';
+import {cloneDeep} from 'lodash';
+
+describe('webex-core', () => {
+  describe('Interceptors', () => {
+    describe('RedirectInterceptor', () => {
+      let interceptor, webex;
+
+      beforeEach(() => {
+        webex = new MockWebex({
+          children: {
+            credentials: Credentials,
+          },
+          config: cloneDeep(config),
+          request: sinon.spy(),
+        });
+
+        interceptor = Reflect.apply(RedirectInterceptor.create, webex, []);
+      });
+
+      describe('#onResponse', () => {
+        it('redirects GET requests to new url on locus redirect error', () => {
+          const response = {
+            statusCode: 404,
+            headers: {},
+            body: {
+              errorCode: 2000002,
+              location: 'http://newlocus.example.com',
+            },
+          };
+
+          interceptor.onResponse({$redirectCount: 0}, response);
+          sinon.assert.calledWith(webex.request, {
+            $redirectCount: 1,
+            uri: 'http://newlocus.example.com',
+          });
+        });
+
+        it('redirects POST requests to new url on locus redirect error', () => {
+          const response = {
+            statusCode: 404,
+            headers: {},
+            body: {
+              errorCode: 2000002,
+              location: 'http://newlocus.example.com?alternate=true',
+            },
+            options: {
+              qs: true,
+            },
+          };
+
+          interceptor.onResponse({$redirectCount: 4}, response);
+          sinon.assert.calledWith(webex.request, {
+            $redirectCount: 5,
+            uri: 'http://newlocus.example.com',
+          });
+        });
+
+        it('does not redirect on reaching max redirects', () => {
+          const response = {
+            statusCode: 404,
+            headers: {},
+            body: {
+              errorCode: 2000002,
+              location: 'http://newlocus.example.com?alternate=true',
+            },
+            options: {
+              qs: true,
+            },
+          };
+
+          assert.isRejected(interceptor.onResponse({$redirectCount: 5}, response));
+        });
+
+        it('returns when locus redirect is not encountered', () => {
+          const response = {
+            statusCode: 404,
+            headers: {},
+            body: {
+              errorCode: 20000,
+              location: 'http://newlocus.example.com?alternate=true',
+            },
+            options: {
+              qs: true,
+            },
+          };
+
+          assert.equal(interceptor.onResponse({$redirectCount: 5}, response), response);
+        });
+
+        it('redirects GET requests to new url on appapi redirect error', () => {
+          const response = {
+            statusCode: 404,
+            headers: {},
+            body: {
+              code: 404100,
+              data: {
+                siteFullUrl: 'newlocus.example.com'
+              },
+            },
+          };
+
+          interceptor.onResponse({$redirectCount: 0, uri: 'https://test.webex.com/meet/v1/join'}, response);
+          sinon.assert.calledWith(webex.request, {
+            $redirectCount: 1,
+            uri: 'https://newlocus.example.com/meet/v1/join',
+          });
+        });
+        it('returns when appapi redirect is not encountered', () => {
+          const response = {
+            statusCode: 404,
+            headers: {},
+            body: {
+              code: 404101,
+              data: {
+                siteFullUrl: 'http://newlocus.example.com?alternate=true'
+              },
+            },
+          };
+
+          assert.equal(interceptor.onResponse({$redirectCount: 5}, response), response);
+        });
+        it('does not redirect on reaching max redirects', () => {
+          const response = {
+            statusCode: 404,
+            headers: {},
+            body: {
+              code: 404100,
+              data: {
+                siteFullUrl: 'http://newlocus.example.com?alternate=true'
+              },
+            },
+            options: {
+              qs: true,
+            },
+          };
+
+          assert.isRejected(interceptor.onResponse({$redirectCount: 5}, response));
+        });
+
+        it('redirects POST requests to new url on appapi redirect error', () => {
+          const response = {
+            statusCode: 404,
+            headers: {},
+            body: {
+              code: 404100,
+              data: {
+                siteFullUrl: 'http://newlocus.example.com?alternate=true'
+              },
+            },
+            options: {
+              qs: true,
+            },
+          };
+
+          interceptor.onResponse({$redirectCount: 4}, response);
+          sinon.assert.calledWith(webex.request, {
+            $redirectCount: 5,
+            uri: 'http://newlocus.example.com',
+          });
+        });
+
+        it('removes authorization header when redirecting preJoin request to webex-appapi-service', () => {
+          const response = {
+            statusCode: 404,
+            headers: {},
+            body: {
+              code: 404100,
+              data: {
+                siteFullUrl: 'newlocus.example.com'
+              },
+            },
+          };
+
+          const options = {
+            $redirectCount: 0,
+            uri: 'https://test.webex.com/meet/v1/preJoin',
+            resource: 'preJoin',
+            service: 'webex-appapi-service',
+            headers: {
+              authorization: 'Bearer token123',
+            },
+          };
+
+          interceptor.onResponse(options, response);
+          sinon.assert.calledWith(webex.request, sinon.match({
+            $redirectCount: 1,
+            uri: 'https://newlocus.example.com/meet/v1/preJoin',
+            resource: 'preJoin',
+            service: 'webex-appapi-service',
+            headers: {
+              authorization: false,
+            },
+          }));
+        });
+
+        it('keeps authorization header for non-preJoin requests on appapi redirect', () => {
+          const response = {
+            statusCode: 404,
+            headers: {},
+            body: {
+              code: 404100,
+              data: {
+                siteFullUrl: 'newlocus.example.com'
+              },
+            },
+          };
+
+          const options = {
+            $redirectCount: 0,
+            uri: 'https://test.webex.com/meet/v1/join',
+            resource: 'join',
+            service: 'webex-appapi-service',
+            headers: {
+              authorization: 'Bearer token123',
+            },
+          };
+
+          interceptor.onResponse(options, response);
+          sinon.assert.calledWith(webex.request, sinon.match({
+            $redirectCount: 1,
+            uri: 'https://newlocus.example.com/meet/v1/join',
+            headers: {
+              authorization: 'Bearer token123',
+            },
+          }));
+        });
+
+        it('keeps authorization header for preJoin requests to non-webex-appapi-service', () => {
+          const response = {
+            statusCode: 404,
+            headers: {},
+            body: {
+              code: 404100,
+              data: {
+                siteFullUrl: 'newlocus.example.com'
+              },
+            },
+          };
+
+          const options = {
+            $redirectCount: 0,
+            uri: 'https://test.webex.com/meet/v1/preJoin',
+            resource: 'preJoin',
+            service: 'other-service',
+            headers: {
+              authorization: 'Bearer token123',
+            },
+          };
+
+          interceptor.onResponse(options, response);
+          sinon.assert.calledWith(webex.request, sinon.match({
+            $redirectCount: 1,
+            uri: 'https://newlocus.example.com/meet/v1/preJoin',
+            headers: {
+              authorization: 'Bearer token123',
+            },
+          }));
+        });
+      });
+    });
+  });
+});

@@ -28,23 +28,24 @@ export async function leaveWebex(
   try {
     log(`Leaving Webex meeting (reason: ${reason || "normal_completion"})...`);
 
-    // Call the leave callback if we have botConfig
-    if (botConfig) {
-      try {
-        await callLeaveCallback(botConfig, reason);
-        log("Leave callback sent successfully");
-      } catch (callbackError: any) {
-        log(
-          `Warning: Failed to send leave callback: ${callbackError.message}`
-        );
-      }
-    }
-
     // Call leaveMeeting via SDK
-    const leaveResult = await page.evaluate(() => window.leaveMeeting());
+    const leaveResult = await page.evaluate(() => (window as any).leaveMeeting());
 
     if (leaveResult && leaveResult.success) {
       log("Successfully left Webex meeting via SDK");
+
+      // Call the leave callback after successful leave
+      if (botConfig) {
+        try {
+          await callLeaveCallback(botConfig, reason);
+          log("Leave callback sent successfully");
+        } catch (callbackError: any) {
+          log(
+            `Warning: Failed to send leave callback: ${callbackError.message}`
+          );
+        }
+      }
+
       return true;
     } else {
       log(

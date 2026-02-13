@@ -45,7 +45,7 @@ export async function joinWebexMeeting(
 
   await page.evaluate(
     ({ meetingUrl, accessToken, displayName }) => {
-      window.__WEBEX_CONFIG = {
+      (window as any).__WEBEX_CONFIG = {
         meetingUrl,
         access_token: accessToken,
         displayName,
@@ -72,10 +72,15 @@ export async function joinWebexMeeting(
   log("Initializing Webex SDK and joining meeting...");
 
   try {
-    await page.evaluate(() => window.initWebex());
+    // initWebex() handles: SDK init → register → create meeting → join
+    // This can take 30-60s depending on network/SDK/Webex response times
+    await Promise.race([
+      page.evaluate(() => (window as any).initWebex()),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("Webex SDK initialization timed out after 90s")), 90000))
+    ]);
   } catch (err: any) {
     // Get detailed error logs from the page
-    const logs = await page.evaluate(() => window.__WEBEX_LOGS);
+    const logs = await page.evaluate(() => (window as any).__WEBEX_LOGS);
     log("Failed to initialize Webex SDK. Page logs:");
     logs.forEach((logEntry: any) => {
       log(`  [${logEntry.timestamp}] ${logEntry.message}`, logEntry.data);
@@ -83,18 +88,8 @@ export async function joinWebexMeeting(
     throw new Error(`Webex SDK initialization failed: ${err.message}`);
   }
 
-  // Wait for join to complete
-  log("Waiting for meeting join to complete...");
-  await page.waitForFunction(
-    () => {
-      const status = window.__WEBEX_STATUS;
-      return status.joined || status.error;
-    },
-    { timeout: 60000 }
-  );
-
-  // Check for errors
-  const status = await page.evaluate(() => window.__WEBEX_STATUS);
+  // Verify join status (initWebex sets status.joined on success)
+  const status = await page.evaluate(() => (window as any).__WEBEX_STATUS);
   if (status.error) {
     throw new Error(`Webex join failed: ${status.error}`);
   }

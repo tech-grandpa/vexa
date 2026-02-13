@@ -147,133 +147,128 @@ export async function startWebexRecording(
       } catch {}
 
       await new Promise<void>((resolve, reject) => {
-        try {
+        (window as any).logBot(
+          "Starting Webex recording process with SDK audio stream."
+        );
+
+        (async () => {
+          // Wait for audio stream to be ready
           (window as any).logBot(
-            "Starting Webex recording process with SDK audio stream."
+            "Waiting for Webex audio stream to be ready..."
           );
 
-          (async () => {
-            // Wait for audio stream to be ready
-            (window as any).logBot(
-              "Waiting for Webex audio stream to be ready..."
+          let audioStreamReady = false;
+          for (let i = 0; i < 30; i++) {
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+
+            const status = window.__WEBEX_STATUS;
+            if (status.audioReady && window.__WEBEX_AUDIO_STREAM) {
+              audioStreamReady = true;
+              break;
+            }
+
+            if (status.error) {
+              throw new Error(`Webex error: ${status.error}`);
+            }
+          }
+
+          if (!audioStreamReady) {
+            throw new Error(
+              "Webex audio stream not ready after 30 seconds"
             );
+          }
 
-            let audioStreamReady = false;
-            for (let i = 0; i < 30; i++) {
-              await new Promise((resolve) => setTimeout(resolve, 1000));
+          (window as any).logBot("Audio stream is ready");
 
-              const status = window.__WEBEX_STATUS;
-              if (status.audioReady && window.__WEBEX_AUDIO_STREAM) {
-                audioStreamReady = true;
-                break;
-              }
+          const audioStream = window.__WEBEX_AUDIO_STREAM;
+          if (!audioStream) {
+            throw new Error("No audio stream available");
+          }
 
-              if (status.error) {
-                throw new Error(`Webex error: ${status.error}`);
-              }
-            }
-
-            if (!audioStreamReady) {
-              throw new Error(
-                "Webex audio stream not ready after 30 seconds"
+          // Set up callbacks
+          (window as any).__vexaOnMessage = (data: any) => {
+            try {
+              audioService.processTranscription(
+                data,
+                whisperLiveService,
+                (window as any).__vexaBotConfig
               );
-            }
-
-            (window as any).logBot("Audio stream is ready");
-
-            const audioStream = window.__WEBEX_AUDIO_STREAM;
-            if (!audioStream) {
-              throw new Error("No audio stream available");
-            }
-
-            // Set up callbacks
-            (window as any).__vexaOnMessage = (data: any) => {
-              try {
-                audioService.processTranscription(
-                  data,
-                  whisperLiveService,
-                  (window as any).__vexaBotConfig
-                );
-              } catch (err: any) {
-                (window as any).logBot(
-                  `[WhisperLive] Error processing transcription: ${err?.message || err}`
-                );
-              }
-            };
-
-            (window as any).__vexaOnError = (error: any) => {
+            } catch (err: any) {
               (window as any).logBot(
-                `[WhisperLive] WebSocket error: ${error?.message || error}`
+                `[WhisperLive] Error processing transcription: ${err?.message || err}`
               );
-            };
+            }
+          };
 
-            (window as any).__vexaOnClose = () => {
-              (window as any).logBot("[WhisperLive] WebSocket closed");
-            };
-
-            // Connect to WhisperLive
-            (window as any).logBot("Connecting to WhisperLive...");
-            await whisperLiveService.connectToWhisperLive(
-              botConfigData,
-              (window as any).__vexaOnMessage,
-              (window as any).__vexaOnError,
-              (window as any).__vexaOnClose
-            );
-
-            (window as any).logBot("Connected to WhisperLive successfully");
-
-            // Set up audio capture from Webex SDK stream
+          (window as any).__vexaOnError = (error: any) => {
             (window as any).logBot(
-              "Setting up audio capture from Webex stream..."
+              `[WhisperLive] WebSocket error: ${error?.message || error}`
             );
+          };
 
-            const audioContext = new AudioContext({ sampleRate: 16000 });
-            const source = audioContext.createMediaStreamSource(audioStream);
-            const processor = audioContext.createScriptProcessor(4096, 1, 1);
+          (window as any).__vexaOnClose = () => {
+            (window as any).logBot("[WhisperLive] WebSocket closed");
+          };
 
-            let sampleCount = 0;
-            processor.onaudioprocess = (e) => {
-              const float32Audio = e.inputBuffer.getChannelData(0);
-
-              // Convert to Int16
-              const int16Audio = new Int16Array(float32Audio.length);
-              for (let i = 0; i < float32Audio.length; i++) {
-                int16Audio[i] =
-                  Math.max(-1, Math.min(1, float32Audio[i])) * 0x7fff;
-              }
-
-              // Send to WhisperLive
-              whisperLiveService.sendAudioData(int16Audio.buffer);
-
-              sampleCount += float32Audio.length;
-              if (sampleCount % 160000 === 0) {
-                // Log every ~10 seconds at 16kHz
-                (window as any).logBot(
-                  `Audio capture active: ${Math.floor(sampleCount / 16000)}s`
-                );
-              }
-            };
-
-            source.connect(processor);
-            processor.connect(audioContext.destination);
-
-            (window as any).logBot(
-              "Audio capture started successfully. Recording meeting audio..."
-            );
-
-            // Store references for cleanup
-            (window as any).__vexaAudioContext = audioContext;
-            (window as any).__vexaAudioProcessor = processor;
-            (window as any).__vexaAudioSource = source;
-
-            resolve();
-          })();
-        } catch (err: any) {
-          (window as any).logBot(
-            `[Recording] Fatal error: ${err?.message || err}`
+          // Connect to WhisperLive
+          (window as any).logBot("Connecting to WhisperLive...");
+          await whisperLiveService.connectToWhisperLive(
+            botConfigData,
+            (window as any).__vexaOnMessage,
+            (window as any).__vexaOnError,
+            (window as any).__vexaOnClose
           );
-          reject(err);
-        }
+
+          (window as any).logBot("Connected to WhisperLive successfully");
+
+          // Set up audio capture from Webex SDK stream
+          (window as any).logBot(
+            "Setting up audio capture from Webex stream..."
+          );
+
+          const audioContext = new AudioContext({ sampleRate: 16000 });
+          const source = audioContext.createMediaStreamSource(audioStream);
+          const processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+          let sampleCount = 0;
+          let lastLogAt = 0;
+          processor.onaudioprocess = (e) => {
+            const float32Audio = e.inputBuffer.getChannelData(0);
+
+            // Convert to Int16
+            const int16Audio = new Int16Array(float32Audio.length);
+            for (let i = 0; i < float32Audio.length; i++) {
+              int16Audio[i] =
+                Math.max(-1, Math.min(1, float32Audio[i])) * 0x7fff;
+            }
+
+            // Send to WhisperLive
+            whisperLiveService.sendAudioData(int16Audio.buffer);
+
+            sampleCount += float32Audio.length;
+            if (sampleCount >= lastLogAt + 160000) {
+              // Log every ~10 seconds at 16kHz
+              lastLogAt = sampleCount;
+              (window as any).logBot(
+                `Audio capture active: ${Math.floor(sampleCount / 16000)}s`
+              );
+            }
+          };
+
+          source.connect(processor);
+          processor.connect(audioContext.destination);
+
+          (window as any).logBot(
+            "Audio capture started successfully. Recording meeting audio..."
+          );
+
+          // Store references for cleanup
+          (window as any).__vexaAudioContext = audioContext;
+          (window as any).__vexaAudioProcessor = processor;
+          (window as any).__vexaAudioSource = source;
+
+          resolve();
+        })().catch(reject);
       });
     },
     {
