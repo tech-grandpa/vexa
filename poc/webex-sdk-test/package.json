@@ -1,0 +1,15 @@
+{
+  "name": "webex-sdk-test",
+  "version": "1.0.0",
+  "description": "POC to test Webex Browser SDK for meeting join and audio access in Node.js",
+  "main": "test-join.js",
+  "scripts": {
+    "test": "node test-join.js"
+  },
+  "keywords": ["webex", "sdk", "poc", "audio", "meeting"],
+  "author": "vexa",
+  "license": "MIT",
+  "dependencies": {
+    "webex": "^3.0.0"
+  }
+}
