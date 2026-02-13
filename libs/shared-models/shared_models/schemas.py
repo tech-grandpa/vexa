@@ -178,6 +178,7 @@ class Platform(str, Enum):
     GOOGLE_MEET = "google_meet"
     ZOOM = "zoom"
     TEAMS = "teams"
+    WEBEX = "webex"
     
     @property
     def bot_name(self) -> str:
@@ -188,7 +189,8 @@ class Platform(str, Enum):
         mapping = {
             Platform.GOOGLE_MEET: "google_meet",
             Platform.ZOOM: "zoom",
-            Platform.TEAMS: "teams"
+            Platform.TEAMS: "teams",
+            Platform.WEBEX: "webex"
         }
         return mapping[self]
     
@@ -220,7 +222,8 @@ class Platform(str, Enum):
         reverse_mapping = {
             "google_meet": Platform.GOOGLE_MEET.value,
             "zoom": Platform.ZOOM.value,
-            "teams": Platform.TEAMS.value
+            "teams": Platform.TEAMS.value,
+            "webex": Platform.WEBEX.value
         }
         return reverse_mapping.get(bot_platform_name)
 
@@ -248,6 +251,18 @@ class Platform(str, Enum):
                     return url
                 else:
                     return None # Invalid Teams ID format - must be numeric only
+            elif platform == Platform.WEBEX:
+                # Webex accepts full URLs, email addresses, or SIP URIs
+                # Accept full webex.com URLs
+                if re.match(r'^https?://[\w.-]*webex\.com/', native_id):
+                    return native_id
+                # Accept email addresses (for direct calls)
+                if re.fullmatch(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', native_id):
+                    return native_id  # SDK accepts email addresses directly
+                # Accept SIP URIs
+                if '@' in native_id and 'webex.com' in native_id:
+                    return native_id
+                return None  # Invalid Webex meeting identifier
             else:
                 return None # Unknown platform
         except ValueError:
