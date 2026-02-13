@@ -502,6 +502,8 @@ async def request_bot(
         meeting_data = {}
         if req.passcode:
             meeting_data['passcode'] = req.passcode
+        if req.access_token:
+            meeting_data['access_token'] = req.access_token
             
         new_meeting = Meeting(
             user_id=current_user.id,
@@ -599,6 +601,11 @@ async def request_bot(
     connection_id = None
     try:
         logger.info(f"Attempting to start bot container for meeting {meeting_id} (native: {native_meeting_id})...")
+        # Build platform-specific data to pass to the bot
+        bot_data = {}
+        if req.access_token:
+            bot_data['access_token'] = req.access_token
+
         container_id, connection_id = await start_bot_container(
             user_id=current_user.id,
             meeting_id=meeting_id, # Internal DB ID
@@ -608,7 +615,8 @@ async def request_bot(
             user_token=user_token,
             native_meeting_id=native_meeting_id,
             language=req.language,
-            task=req.task
+            task=req.task,
+            data=bot_data if bot_data else None
         )
         container_start_time = datetime.utcnow()
         logger.info(f"Call to start_bot_container completed. Container ID: {container_id}, Connection ID: {connection_id}")

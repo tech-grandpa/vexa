@@ -166,7 +166,8 @@ async def start_bot_container(
     user_token: str,
     native_meeting_id: str,
     language: Optional[str],
-    task: Optional[str]
+    task: Optional[str],
+    data: Optional[dict] = None
 ) -> Optional[Tuple[str, str]]:
     """Start a bot as a Node.js child process.
 
@@ -228,7 +229,8 @@ async def start_bot_container(
             "noOneJoinedTimeout": 120000,   # 2 minutes
             "everyoneLeftTimeout": 60000    # 1 minute
         },
-        "botManagerCallbackUrl": f"{BOT_CALLBACK_BASE_URL}/bots/internal/callback/exited"
+        "botManagerCallbackUrl": f"{BOT_CALLBACK_BASE_URL}/bots/internal/callback/exited",
+        "data": data
     }
 
     # Remove None values from config

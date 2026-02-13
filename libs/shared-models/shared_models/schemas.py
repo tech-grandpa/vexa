@@ -348,6 +348,7 @@ class MeetingCreate(BaseModel):
     language: Optional[str] = Field(None, description="Optional language code for transcription (e.g., 'en', 'es')")
     task: Optional[str] = Field(None, description="Optional task for the transcription model (e.g., 'transcribe', 'translate')")
     passcode: Optional[str] = Field(None, description="Optional passcode for the meeting (Teams only)")
+    access_token: Optional[str] = Field(None, description="Optional access token for platforms that require authentication (Webex)")
 
     @field_validator('platform')
     @classmethod
@@ -359,6 +360,17 @@ class MeetingCreate(BaseModel):
         except ValueError:
             supported = ', '.join([p.value for p in Platform])
             raise ValueError(f"Invalid platform '{v}'. Must be one of: {supported}")
+
+    @field_validator('access_token')
+    @classmethod
+    def validate_access_token(cls, v, info: ValidationInfo):
+        """Validate access_token is provided for platforms that require it."""
+        platform = info.data.get('platform') if info.data else None
+        if platform == Platform.WEBEX and (v is None or not v.strip()):
+            raise ValueError("access_token is required for Webex meetings. Get one from https://developer.webex.com/my-apps")
+        if v is not None and platform and platform != Platform.WEBEX:
+            raise ValueError(f"access_token is not supported for {platform} meetings")
+        return v
 
     @field_validator('passcode')
     @classmethod
