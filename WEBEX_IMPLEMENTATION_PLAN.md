@@ -1,29 +1,43 @@
-# Webex Platform Implementation Plan
+# Webex Platform Implementation Plan (SDK-Based Hybrid Approach)
 
 > **Branch:** `feature/webex-platform`  
 > **Author:** Jarvis (AI) for tech-grandpa/vexa  
 > **Date:** 2026-02-13  
-> **Status:** Draft
+> **Status:** Updated — SDK-Based Hybrid Architecture
 
 ## Table of Contents
 
 1. [Executive Summary](#executive-summary)
 2. [Architecture Overview](#architecture-overview)
 3. [File-by-File Breakdown](#file-by-file-breakdown)
-4. [Webex Join Flow](#webex-join-flow)
+4. [Webex SDK Integration Flow](#webex-sdk-integration-flow)
 5. [Audio Capture Strategy](#audio-capture-strategy)
-6. [Bot-Manager Changes](#bot-manager-changes)
-7. [Webex Messaging API Integration](#webex-messaging-api-integration)
-8. [Docker & Config Changes](#docker--config-changes)
-9. [Testing Strategy](#testing-strategy)
-10. [Risks & Mitigations](#risks--mitigations)
-11. [Implementation Phases](#implementation-phases)
+6. [Authentication & Credentials](#authentication--credentials)
+7. [Bot-Manager Changes](#bot-manager-changes)
+8. [Webex Messaging API Integration](#webex-messaging-api-integration)
+9. [Docker & Config Changes](#docker--config-changes)
+10. [Testing Strategy](#testing-strategy)
+11. [Risks & Mitigations](#risks--mitigations)
+12. [Implementation Phases](#implementation-phases)
 
 ---
 
 ## Executive Summary
 
-This plan adds **Webex** as the fourth platform to Vexa's meeting bot system, following the established plugin architecture used by Google Meet and MS Teams. The bot will join Webex meetings via the web client (`web.webex.com`), capture audio through browser MediaStreams, and pipe it to WhisperLive for real-time transcription. Transcripts can optionally be delivered back to Webex spaces via the Webex Messaging API.
+This plan adds **Webex** as the fourth platform to Vexa's meeting bot system. **Critical architectural change:** Instead of DOM scraping via Playwright selectors (the original approach used for Google Meet), Webex implementation uses a **hybrid SDK-based architecture**:
+
+- **Playwright** loads a minimal HTML page (`meeting.html`) that imports the Webex Browser SDK from CDN
+- **Webex SDK** handles meeting initialization, join, audio MediaStream access, and leave
+- **Playwright** controls the SDK via `page.evaluate()` calling exposed JavaScript functions
+- **Status/events** exposed on `window.__WEBEX_STATUS` and `window.__WEBEX_LOGS` for monitoring
+
+**Why this approach?**
+
+✅ **No fragile CSS selectors** — SDK handles all meeting logic  
+✅ **Direct audio access** — SDK provides `remoteAudio` MediaStream via `media:ready` event  
+✅ **No DOM scraping** — no need to reverse-engineer Webex UI changes  
+✅ **Proven in POC** — branch `poc/webex-sdk-hybrid` demonstrates this works  
+✅ **Authentication required** — unlike other platforms, Webex needs credentials (Personal Access Token, Bot Token, or OAuth)
 
 **Key insight:** No existing OSS project supports Webex meeting transcription. This makes Vexa the first open-source tool in this space.
 
@@ -31,27 +45,74 @@ This plan adds **Webex** as the fourth platform to Vexa's meeting bot system, fo
 
 ## Architecture Overview
 
-Vexa's platform plugin system follows a clean strategy pattern:
+### High-Level Flow
 
 ```
 bot-manager (Python/FastAPI)
-  └─ starts vexa-bot container with BOT_CONFIG
+  └─ starts vexa-bot container with BOT_CONFIG (including access_token)
        └─ index.ts dispatches to platform handler
-            └─ platform handler creates PlatformStrategies
+            └─ handleWebex() creates PlatformStrategies
                  └─ runMeetingFlow() orchestrates lifecycle:
                       join → waitForAdmission → prepare → startRecording → leave
 ```
 
-Each platform implements `PlatformStrategies`:
-- `join(page, botConfig)` — Navigate to meeting URL, enter name, click join
-- `waitForAdmission(page, timeoutMs, botConfig)` — Wait for host to admit bot
-- `checkAdmissionSilent(page)` — Verify still in meeting (no side effects)
-- `prepare(page, botConfig)` — Mute mic/camera, dismiss dialogs
-- `startRecording(page, botConfig)` — Capture audio, connect WhisperLive, monitor participants
-- `startRemovalMonitor(page, onRemoval)` — Detect if bot is kicked
-- `leave(page, botConfig, reason)` — Click leave button, clean up
+### Webex-Specific Architecture (Hybrid SDK)
 
-The shared `runMeetingFlow()` handles all lifecycle orchestration, error handling, status callbacks, and removal monitoring. Platform code only needs to implement the UI-specific parts.
+```
+┌──────────────────────────────────────────────────────────┐
+│ Node.js (Playwright)                                     │
+│                                                          │
+│  handleWebex()                                           │
+│    ↓                                                     │
+│  page.goto("file:///.../meeting.html")                  │
+│    ↓                                                     │
+│  page.evaluate(inject __WEBEX_CONFIG)                   │
+│    ↓                                                     │
+│  page.evaluate(() => window.initWebex())                │
+│    ↓                                                     │
+│  monitor window.__WEBEX_STATUS                          │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
+                        │
+                        ▼
+┌──────────────────────────────────────────────────────────┐
+│ Browser Context (Chromium)                               │
+│                                                          │
+│  meeting.html                                            │
+│    ↓                                                     │
+│  <script src="https://unpkg.com/webex@^3/...">          │
+│    ↓                                                     │
+│  window.Webex.init({ credentials: { access_token } })   │
+│    ↓                                                     │
+│  webex.meetings.register()                              │
+│    ↓                                                     │
+│  webex.meetings.create(meetingUrl)                      │
+│    ↓                                                     │
+│  meeting.join({ receiveAudio: true, ... })              │
+│    ↓                                                     │
+│  meeting.on('media:ready', (media) => {                 │
+│    if (media.type === 'remoteAudio') {                  │
+│      window.__WEBEX_AUDIO_STREAM = media.stream         │
+│    }                                                     │
+│  })                                                      │
+│    ↓                                                     │
+│  AudioContext → ScriptProcessorNode                     │
+│    ↓                                                     │
+│  WebSocket → WhisperLive                                │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
+```
+
+**Key differences from Google Meet:**
+
+| Aspect | Google Meet (DOM Scraping) | Webex (SDK Hybrid) |
+|--------|----------------------------|-------------------|
+| **Join** | CSS selectors → click buttons | `meeting.join()` API call |
+| **Lobby** | Poll DOM for lobby indicators | Monitor `meeting.on('meeting:stateChange')` |
+| **Audio** | Find `<audio>` elements, intercept WebRTC | SDK provides `remoteAudio` MediaStream directly |
+| **Leave** | Click leave button via selector | `meeting.leave()` API call |
+| **Removal** | Poll DOM for removal message | `meeting.on('meeting:removed')` event |
+| **Credentials** | None (guest join) | **Required** (access token) |
 
 ---
 
@@ -59,63 +120,149 @@ The shared `runMeetingFlow()` handles all lifecycle orchestration, error handlin
 
 ### New Files in `services/vexa-bot/core/src/platforms/webex/`
 
-#### `selectors.ts`
-Centralized CSS/aria selectors for `web.webex.com` UI elements.
+#### `meeting.html` — **NEW: SDK Host Page**
 
-```typescript
-// Key selector groups to define:
+Minimal HTML page that loads the Webex Browser SDK from CDN and exposes control functions to Playwright.
 
-// Join flow
-export const webexNameInputSelectors: string[];      // Guest name input field
-export const webexJoinButtonSelectors: string[];     // "Join meeting" / "Join" button
-export const webexMicrophoneButtonSelectors: string[]; // Mute mic toggle
-export const webexCameraButtonSelectors: string[];   // Camera off toggle
+**Key sections:**
 
-// Admission detection
-export const webexLobbyIndicators: string[];         // "Waiting for host" / lobby screen
-export const webexInMeetingIndicators: string[];     // Controls toolbar, participant panel, etc.
-export const webexRejectionIndicators: string[];     // "Host denied your request" etc.
-
-// Participant & speaker detection
-export const webexParticipantSelectors: string[];    // Participant list items
-export const webexParticipantNameSelectors: string[];// Name within participant element
-export const webexSpeakingIndicators: string[];      // Active speaker visual cues (blue border, icon)
-export const webexParticipantCountSelectors: string[]; // Participant count badge
-
-// Removal / end detection
-export const webexRemovedIndicators: string[];       // "You've been removed" / "Meeting ended"
-export const webexLeaveButtonSelectors: string[];    // Leave meeting button
-
-// People panel
-export const webexPeopleButtonSelectors: string[];   // Button to open participants panel
+```html
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Webex SDK Host</title>
+</head>
+<body>
+  <div id="status">Initializing...</div>
+  
+  <!-- Load Webex SDK from CDN -->
+  <script crossorigin src="https://unpkg.com/webex@^3/umd/webex.min.js"></script>
+  
+  <script>
+    // Global state for Playwright
+    window.__WEBEX_STATUS = {
+      initialized: false,
+      registered: false,
+      meetingCreated: false,
+      joined: false,
+      audioReady: false,
+      error: null,
+      meetingState: null
+    };
+    
+    window.__WEBEX_LOGS = [];
+    window.__WEBEX_AUDIO_STREAM = null;
+    window.__WEBEX_INSTANCE = null;
+    window.__WEBEX_MEETING = null;
+    
+    function log(message, data) { /* logging helper */ }
+    
+    // Exposed to Playwright
+    window.initWebex = async function() {
+      // 1. Init SDK with credentials
+      // 2. Register with Webex
+      // 3. Create meeting
+      // 4. Bind event listeners (media:ready, meeting:stateChange, etc.)
+      // 5. Join meeting
+    };
+    
+    window.leaveMeeting = async function() {
+      // Call meeting.leave()
+    };
+    
+    window.getAudioStream = function() {
+      return window.__WEBEX_AUDIO_STREAM;
+    };
+    
+    window.getMeetingStatus = function() {
+      return window.__WEBEX_STATUS;
+    };
+  </script>
+</body>
+</html>
 ```
 
-**Research required:** These selectors must be reverse-engineered from `web.webex.com` by inspecting the DOM during a live Webex meeting. Webex uses React with dynamically generated class names, so **aria-labels and data attributes** should be preferred over CSS classes.
+**Responsibilities:**
+- Load Webex SDK from CDN (versioned via `webex@^3`)
+- Initialize SDK with access token (injected by Playwright)
+- Create and join meeting via SDK API
+- Expose `remoteAudio` MediaStream on `media:ready` event
+- Provide status/logging for Playwright to monitor
 
-#### `join.ts`
-Handles navigation to Webex meeting and joining as a guest.
+**Reference:** `poc/webex-sdk-hybrid/meeting.html`
+
+#### `join.ts` — Meeting Join (SDK-Based)
+
+**OLD approach (removed):** Navigate to `web.webex.com`, find selectors, click buttons  
+**NEW approach:** Load `meeting.html`, inject config, call SDK functions
 
 ```typescript
 export async function joinWebexMeeting(
-  page: Page, meetingUrl: string, botName: string, botConfig: BotConfig
+  page: Page,
+  meetingUrl: string,
+  botName: string,
+  botConfig: BotConfig
 ): Promise<void>;
 ```
 
-**Webex join flow specifics:**
-1. Navigate to `https://web.webex.com/meet/<meeting_id>` (or full meeting link)
-2. Webex may redirect to a "Join" landing page — wait for it to load
-3. Select "Join from browser" (not the desktop app prompt)
-4. Enter guest name in the name input field
-5. Mute microphone and camera before joining
-6. Click "Join meeting" button
-7. Handle potential "Enter meeting password" prompt (if meeting has password)
+**Flow:**
 
-#### `admission.ts`
-Handles lobby/waiting room detection.
+1. **Load meeting.html** from local file system:
+   ```typescript
+   const htmlPath = path.join(__dirname, 'meeting.html');
+   await page.goto(`file://${htmlPath}`);
+   ```
+
+2. **Inject configuration** via `page.evaluate()`:
+   ```typescript
+   await page.evaluate(({ meetingUrl, accessToken, botName }) => {
+     window.__WEBEX_CONFIG = {
+       meetingUrl,
+       access_token: accessToken,
+       displayName: botName
+     };
+   }, {
+     meetingUrl,
+     accessToken: botConfig.data.access_token,
+     botName
+   });
+   ```
+
+3. **Initialize and join** via SDK:
+   ```typescript
+   await page.evaluate(() => window.initWebex());
+   ```
+
+4. **Monitor status** until `joined`:
+   ```typescript
+   await page.waitForFunction(() => {
+     const status = window.__WEBEX_STATUS;
+     return status.joined || status.error;
+   }, { timeout: 60000 });
+   ```
+
+5. **Handle errors:**
+   ```typescript
+   const status = await page.evaluate(() => window.__WEBEX_STATUS);
+   if (status.error) {
+     throw new Error(`Webex join failed: ${status.error}`);
+   }
+   ```
+
+**No selectors needed!** The SDK handles all UI interactions.
+
+**Reference:** `poc/webex-sdk-hybrid/test-hybrid.js` (lines 34-66)
+
+#### `admission.ts` — Lobby & Admission (SDK Events)
+
+**OLD approach (removed):** Poll DOM for lobby indicators  
+**NEW approach:** Monitor SDK's `meeting:stateChange` events
 
 ```typescript
 export async function waitForWebexAdmission(
-  page: Page, timeoutMs: number, botConfig: BotConfig
+  page: Page,
+  timeoutMs: number,
+  botConfig: BotConfig
 ): Promise<AdmissionResult>;
 
 export async function checkForWebexAdmissionSilent(
@@ -123,177 +270,588 @@ export async function checkForWebexAdmissionSilent(
 ): Promise<boolean>;
 ```
 
-**Webex admission specifics:**
-- Webex has a lobby system similar to Teams/Meet
-- Bot needs to detect transition from lobby → meeting (toolbar appears, participant list loads)
-- Rejection: host can deny entry → detect rejection message
-- Some meetings allow direct join (no lobby) — handle instant admission
+**SDK meeting states:**
+- `IDLE` → initial
+- `LOBBY` → waiting for host to admit (if enabled)
+- `JOINED` → admitted and in meeting
+- `LEFT` → left the meeting
+- `REJECTED` → host denied entry
 
-#### `recording.ts`
-Core audio capture and WhisperLive integration. This is the most complex file.
+**Flow:**
+
+```typescript
+// Monitor meeting state transitions
+await page.waitForFunction(() => {
+  const status = window.__WEBEX_STATUS;
+  return status.meetingState === 'JOINED' || 
+         status.meetingState === 'REJECTED' ||
+         status.error;
+}, { timeout: timeoutMs });
+
+const finalStatus = await page.evaluate(() => window.__WEBEX_STATUS);
+
+if (finalStatus.meetingState === 'REJECTED') {
+  return { admitted: false, rejected: true };
+}
+
+if (finalStatus.error) {
+  throw new Error(finalStatus.error);
+}
+
+return { admitted: true, rejected: false };
+```
+
+**No DOM polling!** The SDK emits state change events that we capture in `meeting.html`.
+
+#### `recording.ts` — Audio Capture & WhisperLive Integration
+
+**OLD approach (removed):** Intercept RTCPeerConnection, find `<audio>` DOM elements  
+**NEW approach:** SDK provides `remoteAudio` MediaStream directly via `media:ready` event
 
 ```typescript
 export async function startWebexRecording(
-  page: Page, botConfig: BotConfig
+  page: Page,
+  botConfig: BotConfig
 ): Promise<void>;
 ```
 
-**Pattern:** Follows Google Meet's recording.ts closely:
-1. Initialize `WhisperLiveService` on Node.js side with stubborn reconnection
-2. Inject browser-side code via `page.evaluate()` that:
-   - Creates `BrowserAudioService` to find `<audio>`/`<video>` elements and capture MediaStreams
-   - Creates `BrowserWhisperLiveService` for WebSocket communication
-   - Sets up speaker detection via MutationObserver on participant elements
-   - Monitors participant count for alone-timeout logic
-   - Handles reconfiguration (language/task changes) via `triggerWebSocketReconfigure`
+**Audio pipeline:**
 
-#### `removal.ts`
-Detects if the bot has been removed from the meeting.
-
-```typescript
-export async function startWebexRemovalMonitor(
-  page: Page, onRemoval?: () => void | Promise<void>
-): () => void;
+```
+Webex SDK media:ready event
+  → window.__WEBEX_AUDIO_STREAM (MediaStream)
+  → AudioContext.createMediaStreamSource()
+  → ScriptProcessorNode (downsample to 16kHz mono)
+  → WebSocket → WhisperLive server
 ```
 
-**Detection strategies:**
-- Poll for "You've been removed" / "Meeting has ended" text
-- Monitor URL changes (redirect away from meeting page)
-- Watch for disappearance of in-meeting UI elements (toolbar)
+**Implementation pattern (same as Google Meet, but simpler):**
 
-#### `leave.ts`
-Handles graceful departure from the meeting.
+1. **Initialize WhisperLive on Node.js side:**
+   ```typescript
+   const whisperLive = new WhisperLiveService(botConfig);
+   await whisperLive.connect();
+   ```
+
+2. **Inject browser-side audio capture code:**
+   ```typescript
+   await page.evaluate((config) => {
+     // Wait for __WEBEX_AUDIO_STREAM to be available
+     const checkAudioReady = setInterval(() => {
+       if (window.__WEBEX_AUDIO_STREAM) {
+         clearInterval(checkAudioReady);
+         
+         // Create AudioContext
+         const audioContext = new AudioContext({ sampleRate: 16000 });
+         const source = audioContext.createMediaStreamSource(
+           window.__WEBEX_AUDIO_STREAM
+         );
+         
+         // Create processor (16kHz mono PCM)
+         const processor = audioContext.createScriptProcessor(4096, 1, 1);
+         
+         processor.onaudioprocess = (e) => {
+           const audioData = e.inputBuffer.getChannelData(0);
+           
+           // Convert Float32Array to Int16Array
+           const int16Audio = new Int16Array(audioData.length);
+           for (let i = 0; i < audioData.length; i++) {
+             int16Audio[i] = Math.max(-1, Math.min(1, audioData[i])) * 0x7FFF;
+           }
+           
+           // Send to WhisperLive via WebSocket
+           if (window.__WHISPER_WS?.readyState === WebSocket.OPEN) {
+             window.__WHISPER_WS.send(int16Audio.buffer);
+           }
+         };
+         
+         source.connect(processor);
+         processor.connect(audioContext.destination);
+       }
+     }, 100);
+   }, botConfig);
+   ```
+
+3. **Speaker detection (if SDK supports it):**
+   
+   The Webex SDK provides `meeting.members` collection. Each member has properties like:
+   - `isActiveSpeaker` (boolean, updated when speaker changes)
+   - `isSpeaking` (boolean, based on audio level)
+   - `audioMuted` (boolean)
+   
+   **Implementation:**
+   
+   ```typescript
+   // In meeting.html, after meeting.join():
+   meeting.on('meeting:activeSpeakerChanged', (payload) => {
+     const { activeSpeaker } = payload;
+     window.__WEBEX_LOGS.push({
+       type: 'SPEAKER_CHANGE',
+       timestamp: Date.now(),
+       speakerId: activeSpeaker.id,
+       speakerName: activeSpeaker.name
+     });
+     
+     // Send to WhisperLive for diarization
+     if (window.__SPEAKER_DETECTION_ENABLED) {
+       // Send SPEAKER_START event
+     }
+   });
+   
+   meeting.on('members:update', (delta) => {
+     // Track member join/leave, mute/unmute
+   });
+   ```
+   
+   **Fallback:** If SDK doesn't provide `activeSpeakerChanged` event, poll `meeting.members` for `isActiveSpeaker` changes every 500ms.
+
+4. **Alone-in-meeting timeout:**
+   
+   ```typescript
+   // Check meeting.members.length
+   const participantCount = await page.evaluate(() => {
+     const meeting = window.__WEBEX_MEETING;
+     return meeting?.members?.membersCollection?.length || 0;
+   });
+   
+   if (participantCount <= 1) {
+     // Start alone timeout counter
+   }
+   ```
+
+**No RTCPeerConnection interception!** No DOM element scanning! SDK gives us everything.
+
+**Reference:** `poc/webex-sdk-hybrid/test-hybrid.js` (lines 125-167)
+
+#### `leave.ts` — Graceful Leave (SDK Call)
+
+**OLD approach (removed):** Find leave button selector, click  
+**NEW approach:** Call `meeting.leave()` via SDK
 
 ```typescript
 export async function prepareForWebexRecording(
-  page: Page, botConfig: BotConfig
+  page: Page,
+  botConfig: BotConfig
 ): Promise<void>;
 
 export async function leaveWebex(
-  page: Page | null, botConfig?: BotConfig, reason?: LeaveReason
+  page: Page | null,
+  botConfig?: BotConfig,
+  reason?: LeaveReason
 ): Promise<boolean>;
 ```
 
-**Leave flow:**
-1. Click the "Leave meeting" button
-2. Confirm leave if dialog appears
-3. Return `true` if successful, `false` if button not found
+**Flow:**
 
-#### `index.ts`
-Platform handler entry point — wires up strategies and calls `runMeetingFlow()`.
+```typescript
+try {
+  await page.evaluate(() => window.leaveMeeting());
+  return true;
+} catch (err) {
+  log.error('Failed to leave Webex meeting', err);
+  return false;
+}
+```
+
+**Simple!** Just one line in the browser context: `await meeting.leave()`
+
+#### `removal.ts` — Removal/End Detection (SDK Events)
+
+**OLD approach (removed):** Poll DOM for "You've been removed" text  
+**NEW approach:** Listen to SDK events
+
+```typescript
+export async function startWebexRemovalMonitor(
+  page: Page,
+  onRemoval?: () => void | Promise<void>
+): () => void;
+```
+
+**SDK events to monitor:**
+
+```typescript
+// In meeting.html:
+meeting.on('meeting:removed', (reason) => {
+  log('Bot was removed from meeting', reason);
+  window.__WEBEX_STATUS.removed = true;
+  window.__WEBEX_STATUS.removalReason = reason.type;
+});
+
+meeting.on('meeting:ended', () => {
+  log('Meeting ended by host');
+  window.__WEBEX_STATUS.ended = true;
+});
+```
+
+**Monitoring from Playwright:**
+
+```typescript
+const stopMonitoring = async () => {
+  while (true) {
+    await page.waitForTimeout(1000);
+    
+    const status = await page.evaluate(() => window.__WEBEX_STATUS);
+    
+    if (status.removed || status.ended) {
+      if (onRemoval) {
+        await onRemoval();
+      }
+      break;
+    }
+  }
+};
+
+// Return cleanup function
+return () => { /* stop monitoring loop */ };
+```
+
+#### `index.ts` — Platform Handler Entry Point
+
+Wires up SDK-based strategies and calls `runMeetingFlow()`.
 
 ```typescript
 import { PlatformStrategies, runMeetingFlow } from "../shared/meetingFlow";
+import { joinWebexMeeting } from "./join";
+import { waitForWebexAdmission, checkForWebexAdmissionSilent } from "./admission";
+import { prepareForWebexRecording } from "./leave";
+import { startWebexRecording } from "./recording";
+import { startWebexRemovalMonitor } from "./removal";
+import { leaveWebex } from "./leave";
 
 export async function handleWebex(
   botConfig: BotConfig,
   page: Page,
   gracefulLeaveFunction: (page: Page | null, exitCode: number, reason: string, errorDetails?: any) => Promise<void>
-): Promise<void>;
+): Promise<void> {
+  
+  // Validate credentials
+  if (!botConfig.data?.access_token) {
+    throw new Error('Webex platform requires access_token in botConfig.data');
+  }
+  
+  const strategies: PlatformStrategies = {
+    join: joinWebexMeeting,
+    waitForAdmission: waitForWebexAdmission,
+    checkAdmissionSilent: checkForWebexAdmissionSilent,
+    prepare: prepareForWebexRecording,
+    startRecording: startWebexRecording,
+    startRemovalMonitor: startWebexRemovalMonitor,
+    leave: leaveWebex
+  };
+
+  await runMeetingFlow(page, botConfig, strategies, gracefulLeaveFunction);
+}
 
 export { leaveWebex };
 ```
 
-This follows the exact pattern of `platforms/googlemeet/index.ts`.
+**Pattern:** Identical to `platforms/googlemeet/index.ts`, just SDK-based strategies instead of DOM-based.
+
+#### `selectors.ts` — **REMOVED ENTIRELY**
+
+**No CSS selectors needed!** The SDK handles all UI interactions. This file is not created.
 
 ---
 
-## Webex Join Flow
+## Webex SDK Integration Flow
 
-### Meeting URL Formats
+### 1. SDK Initialization
 
-Webex supports several URL patterns:
-```
-https://meet<N>.webex.com/meet/pr/<PMR_ID>           # Personal Meeting Room
-https://<site>.webex.com/meet/<host_name>             # Named PMR
-https://<site>.webex.com/<site>/j.php?MTID=<id>      # Scheduled meeting
-https://web.webex.com/meet/<meeting_id>               # Universal web link
-```
-
-The bot-manager `construct_meeting_url` should normalize these. For the initial implementation, accept full Webex meeting URLs as `native_meeting_id` (similar to how Teams handles full URLs).
-
-### Browser Flow (Playwright)
-
-```
-1. page.goto(meetingUrl)
-2. Wait for page load (Webex SPA takes 5-10s to initialize)
-3. Handle "Open in desktop app" prompt → dismiss, choose "Join from browser"
-4. If guest: enter name in input field
-5. Toggle mic off, camera off
-6. Click "Join meeting" / "Join" button
-7. If lobby: wait for admission (host admits or timeout)
-8. If password required: enter password (from botConfig.data.passcode)
-9. Detect in-meeting state (toolbar visible, participant list accessible)
+```javascript
+const webex = window.Webex.init({
+  credentials: {
+    access_token: '<user_or_bot_token>'
+  }
+});
 ```
 
-### Key Challenges
+### 2. Registration
 
-- **Desktop app prompt:** Webex aggressively pushes its desktop app. The bot must dismiss this and select "Join from your browser."
-- **Cookie consent / GDPR dialogs:** May appear on first visit — need to dismiss.
-- **CAPTCHA / bot detection:** Webex may detect headless browsers. Stealth plugin + realistic user agent are critical.
-- **Meeting password:** Some Webex meetings require a password — must be passed through `botConfig.data.passcode`.
+```javascript
+await webex.meetings.register();
+```
+
+This connects the SDK to Webex infrastructure and prepares for meeting operations.
+
+### 3. Meeting Creation
+
+```javascript
+const meeting = await webex.meetings.create(destination);
+```
+
+`destination` can be:
+- Full meeting URL: `https://example.webex.com/meet/john`
+- Email address: `john.doe@example.com`
+- SIP URI: `meeting@example.webex.com`
+- Person ID or Room ID (base64-encoded Webex identifiers)
+
+### 4. Event Binding
+
+```javascript
+meeting.on('media:ready', (media) => {
+  if (media.type === 'remoteAudio') {
+    window.__WEBEX_AUDIO_STREAM = media.stream;
+  }
+});
+
+meeting.on('meeting:stateChange', (state) => {
+  window.__WEBEX_STATUS.meetingState = state.current;
+});
+
+meeting.on('meeting:removed', (reason) => {
+  window.__WEBEX_STATUS.removed = true;
+});
+
+meeting.on('members:update', (delta) => {
+  // Track participant changes
+});
+```
+
+### 5. Join Meeting
+
+```javascript
+await meeting.join({
+  mediaOptions: {
+    receiveAudio: true,   // Capture audio from others
+    receiveVideo: false,  // No video needed
+    sendAudio: false,     // Bot doesn't speak
+    sendVideo: false      // Bot doesn't show video
+  }
+});
+```
+
+### 6. Audio Stream Access
+
+```javascript
+// Available after 'media:ready' event fires
+const audioStream = window.__WEBEX_AUDIO_STREAM;
+const audioContext = new AudioContext({ sampleRate: 16000 });
+const source = audioContext.createMediaStreamSource(audioStream);
+// ... connect to WhisperLive
+```
+
+### 7. Leave Meeting
+
+```javascript
+await meeting.leave();
+```
 
 ---
 
 ## Audio Capture Strategy
 
-### Primary: RTCPeerConnection Interception (No DOM Audio Elements Required)
+### Primary: SDK-Provided MediaStream
 
-Webex may not render audio through `<audio>`/`<video>` DOM elements — it likely handles audio purely via WebRTC peer connections. Therefore, the **primary** capture strategy intercepts WebRTC directly, which works regardless of how Webex renders audio:
+The Webex SDK provides `remoteAudio` directly via the `media:ready` event. **No interception needed!**
 
-1. **Before page loads**, inject a hook via `page.evaluateOnNewDocument()` that patches `RTCPeerConnection.prototype`:
-   - Intercept `ontrack` events to capture incoming audio `MediaStreamTrack`s
-   - Alternatively, wrap `addTrack`/`addTransceiver` to catch outbound tracks
-2. **Collect audio tracks** as the WebRTC connection negotiates — each remote audio track represents a participant's audio
-3. **Feed into AudioContext:** `MediaStreamSource` → `ScriptProcessorNode`/`AudioWorklet` → downsample to 16kHz mono PCM
-4. **Send to WhisperLive** via WebSocket from browser context (same pipeline as Google Meet)
+**Flow:**
 
-```javascript
-// Injected before page loads via page.evaluateOnNewDocument()
-const originalRTCPeerConnection = window.RTCPeerConnection;
-window.RTCPeerConnection = function(...args) {
-  const pc = new originalRTCPeerConnection(...args);
-  pc.addEventListener('track', (event) => {
-    if (event.track.kind === 'audio') {
-      // Feed track into shared AudioContext for capture
-      window.__vexaAudioCapture?.addTrack(event.track, event.streams[0]);
-    }
-  });
-  return pc;
-};
+```
+Webex SDK
+  ↓ (media:ready event)
+MediaStream (remoteAudio)
+  ↓
+AudioContext.createMediaStreamSource()
+  ↓
+ScriptProcessorNode (4096 buffer, 16kHz mono)
+  ↓
+Convert Float32Array → Int16Array
+  ↓
+WebSocket.send() → WhisperLive
 ```
 
-**Why not Cisco Browser SDK?**
-- Requires OAuth credentials and app registration
-- Designed for building Webex-integrated apps, not joining arbitrary meetings as a guest
-- Playwright web client approach needs no Webex API credentials
-- The web client handles all WebRTC negotiation — we just intercept the resulting audio
-
-### Fallback: DOM Audio Element Discovery
-
-If Webex does render audio through DOM elements, the existing `BrowserAudioService.findMediaElements()` method works as a fallback:
+**Code (browser-side):**
 
 ```javascript
-const elements = document.querySelectorAll('audio, video');
-const active = Array.from(elements).filter(el => 
-  el.srcObject && el.srcObject.getAudioTracks().length > 0
-);
+meeting.on('media:ready', (media) => {
+  if (media.type === 'remoteAudio') {
+    const audioContext = new AudioContext({ sampleRate: 16000 });
+    const source = audioContext.createMediaStreamSource(media.stream);
+    const processor = audioContext.createScriptProcessor(4096, 1, 1);
+    
+    processor.onaudioprocess = (e) => {
+      const float32Audio = e.inputBuffer.getChannelData(0);
+      
+      // Convert to Int16
+      const int16Audio = new Int16Array(float32Audio.length);
+      for (let i = 0; i < float32Audio.length; i++) {
+        int16Audio[i] = Math.max(-1, Math.min(1, float32Audio[i])) * 0x7FFF;
+      }
+      
+      // Send to WhisperLive
+      if (window.__WHISPER_WS?.readyState === WebSocket.OPEN) {
+        window.__WHISPER_WS.send(int16Audio.buffer);
+      }
+    };
+    
+    source.connect(processor);
+    processor.connect(audioContext.destination);
+  }
+});
 ```
-
-**Strategy order:** Try RTCPeerConnection interception first (always available). If no tracks arrive within 10s of joining, fall back to DOM element scanning.
 
 ### Speaker Detection
 
-Webex shows active speaker indicators (e.g., blue border around video tile, speaker icon). The approach mirrors Google Meet:
+**SDK provides:**
+- `meeting.on('meeting:activeSpeakerChanged', callback)` — fires when active speaker changes
+- `meeting.members.membersCollection` — array of participants
+- Each member has:
+  - `id`, `name`, `isActiveSpeaker`, `isSpeaking`, `audioMuted`, etc.
 
-1. **MutationObserver** on participant container elements watching for class changes
-2. **Polling fallback** every 500ms checking speaking indicator visibility
-3. Send `SPEAKER_START` / `SPEAKER_END` events to WhisperLive for speaker diarization
+**Implementation:**
 
-Webex-specific indicators to look for:
-- Active speaker highlight (CSS class on video tile)
-- Speaking icon in participant list
-- Audio level visualization bars
+```javascript
+meeting.on('meeting:activeSpeakerChanged', (payload) => {
+  const speaker = payload.activeSpeaker;
+  
+  // Send SPEAKER_START event to WhisperLive
+  sendSpeakerEvent({
+    type: 'SPEAKER_START',
+    speakerId: speaker.id,
+    speakerName: speaker.name,
+    timestamp: Date.now()
+  });
+});
+```
+
+**Fallback:** If `activeSpeakerChanged` event is unreliable, poll `meeting.members` every 500ms for `isActiveSpeaker` changes.
+
+### No RTCPeerConnection Interception Needed!
+
+Unlike the original plan (and Google Meet implementation), **we don't need to patch `RTCPeerConnection.prototype`** because the SDK gives us direct MediaStream access.
+
+---
+
+## Authentication & Credentials
+
+**CRITICAL DIFFERENCE:** Webex requires authentication (unlike Google Meet/Zoom which support anonymous guest join).
+
+### Authentication Methods
+
+#### 1. Personal Access Token (Development/Testing)
+
+**Use case:** Quick testing, POC, personal use  
+**Validity:** 12 hours  
+**How to get:**
+1. Go to https://developer.webex.com
+2. Sign in with your Webex account
+3. Navigate to **Getting Started** → https://developer.webex.com/docs/api/getting-started
+4. Copy the auto-generated **Personal Access Token**
+
+**Scopes:** All personal scopes (full meeting access)
+
+**Limitations:**
+- Expires after 12 hours
+- Cannot be used in production
+- Tied to a specific user account
+
+**Configuration:**
+```typescript
+botConfig.data.access_token = '<personal_access_token>';
+```
+
+#### 2. Bot Token (Production)
+
+**Use case:** Production deployment, automated bots  
+**Validity:** No expiration (can be regenerated)  
+**How to get:**
+1. Go to https://developer.webex.com
+2. Sign in and click **Start Building Apps**
+3. Choose **Create a Bot**
+4. Fill in bot name, username, icon
+5. Copy the **Bot Access Token** (shown only once!)
+
+**Scopes:** Limited to bot scopes (meeting participation, message sending)
+
+**Limitations:**
+- Must be added to spaces/meetings to participate
+- Cannot access user-specific resources
+
+**Configuration:**
+```typescript
+botConfig.data.access_token = '<bot_access_token>';
+```
+
+#### 3. OAuth Integration (Production, User-Delegated)
+
+**Use case:** Enterprise deployments, user-authorized bots  
+**Validity:** Access token (short-lived), refresh token (long-lived)  
+**How to get:**
+1. Create an Integration at https://developer.webex.com
+2. Configure OAuth scopes (e.g., `meeting:schedules_read`, `spark:all`)
+3. Implement OAuth flow (authorize → exchange code for tokens)
+4. Refresh access token when expired
+
+**Scopes:** Customizable per integration
+
+**Limitations:**
+- Requires OAuth flow implementation
+- Token refresh logic needed
+
+**Configuration:**
+```typescript
+botConfig.data.access_token = '<oauth_access_token>';
+// Store refresh_token securely for token renewal
+```
+
+#### 4. Guest Issuer (Guest Access)
+
+**Use case:** Allow non-Webex users to join meetings  
+**Validity:** JWT tokens with custom expiration  
+**How to get:**
+1. Create an Integration with Guest Issuer enabled
+2. Use Guest Issuer API to generate JWT tokens for guest users
+3. Documentation: https://developer.webex.com/docs/guest-issuer
+
+**Limitations:**
+- Requires server-side JWT generation
+- Guest users have limited permissions
+
+### Bot-Manager Integration
+
+**New field in `MeetingCreate` request:**
+
+```python
+# In bot-manager API
+class MeetingCreate(BaseModel):
+    platform: Platform
+    native_meeting_id: str
+    bot_name: str
+    # ... existing fields ...
+    
+    # NEW for Webex:
+    webex_access_token: Optional[str] = None  # Required if platform == WEBEX
+```
+
+**Validation:**
+
+```python
+if meeting.platform == Platform.WEBEX and not meeting.webex_access_token:
+    raise HTTPException(
+        status_code=400,
+        detail="webex_access_token is required for Webex meetings"
+    )
+```
+
+**Passed to bot container:**
+
+```python
+bot_config = {
+    "platform": "webex",
+    "native_meeting_id": meeting_url,
+    "data": {
+        "access_token": meeting.webex_access_token  # NEW
+    }
+    # ... rest of config
+}
+```
+
+### Security Considerations
+
+- **Never log access tokens** — mask in logs as `<token>***`
+- **Store bot tokens securely** — use environment variables or secret management
+- **Implement token rotation** for OAuth integrations
+- **Validate token scopes** before joining meetings
 
 ---
 
@@ -324,9 +882,12 @@ elif platform == Platform.WEBEX:
     # Validate it's a webex.com domain
     if re.match(r'^https?://[\w.-]*webex\.com/', native_id):
         return native_id
-    # Or accept PMR names: site.webex.com/meet/<name>
-    if re.fullmatch(r'^[\w.-]+$', native_id):
-        return f"https://web.webex.com/meet/{native_id}"
+    # Or accept email addresses (for direct calls)
+    if re.fullmatch(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', native_id):
+        return native_id  # SDK accepts email addresses directly
+    # Or accept SIP URIs
+    if '@' in native_id and 'webex.com' in native_id:
+        return native_id
     return None
 ```
 
@@ -335,6 +896,11 @@ elif platform == Platform.WEBEX:
 ```typescript
 export type BotConfig = {
   platform: "google_meet" | "zoom" | "teams" | "webex",  // ADD "webex"
+  native_meeting_id: string,
+  data: {
+    access_token?: string,  // NEW: Required for Webex
+    // ... existing fields
+  },
   // ... rest unchanged
 }
 ```
@@ -357,7 +923,7 @@ import { handleWebex, leaveWebex } from "./platforms/webex";
 }
 ```
 
-Browser launch: Webex works with Chrome (not Edge-specific like Teams), so it falls into the default Chromium path with stealth plugin.
+Browser launch: Webex SDK works with Chrome (Chromium), no special browser config needed.
 
 ### 4. Orchestrator / Container Config
 
@@ -438,13 +1004,14 @@ No changes needed to `docker-compose.yml` — the vexa-bot service is already ge
 
 ### Playwright Browser
 
-Webex web client works with Chromium. The existing default browser launch path (with stealth plugin) is suitable. Key browser args already present:
+Webex SDK works with Chromium. The existing default browser launch path is suitable. Key browser args already present:
 
 ```typescript
 // Already in browserArgs constant:
 '--use-fake-ui-for-media-stream',  // Auto-allow mic/camera
 '--use-fake-device-for-media-stream',
 '--disable-web-security',
+'--autoplay-policy=no-user-gesture-required',
 // etc.
 ```
 
@@ -454,42 +1021,52 @@ No additional browser configuration needed.
 
 ## Testing Strategy
 
-### Phase 1: Selector Discovery & Validation
+### Phase 1: SDK Integration & Join Flow (No Selector Research!)
 
-1. **Manual browser inspection:** Join a Webex meeting in a regular Chrome browser, use DevTools to document DOM structure, element selectors, and class patterns
-2. **Create selector test script:** A standalone Playwright script that joins a Webex meeting and validates each selector group
-3. **Screenshot checkpoints:** Like Google Meet, save screenshots at each join flow step for debugging
+1. **Create `meeting.html`** based on POC template
+2. **Implement `join.ts`** to load HTML and call `initWebex()`
+3. **Test join flow** with Personal Access Token
+4. **Validate status monitoring** (`window.__WEBEX_STATUS`)
+5. **Screenshot checkpoints** at each step
 
-### Phase 2: Unit Tests
+### Phase 2: Audio Capture & Transcription
 
-- **Selector tests:** Verify selector arrays are non-empty and well-formed
-- **URL construction:** Test `construct_meeting_url` with various Webex URL formats
-- **Mock admission flow:** Test `waitForWebexAdmission` with simulated DOM states
+1. **Verify `media:ready` event** fires with `remoteAudio` stream
+2. **Implement audio capture** (AudioContext → ScriptProcessorNode)
+3. **Test WhisperLive connection** and audio pipeline
+4. **Verify transcription** with multiple speakers
+5. **Implement speaker detection** (`activeSpeakerChanged` event or polling)
 
-### Phase 3: Integration Tests
+### Phase 3: Admission & Removal
 
-1. **Join flow test:** Bot successfully joins a Webex PMR (Personal Meeting Room)
-2. **Audio capture test:** Verify `<audio>`/`<video>` elements are found and audio data flows
-3. **WhisperLive connection:** Confirm WebSocket connects and receives transcription
-4. **Speaker detection:** Verify speaker events fire when participants speak
-5. **Leave flow:** Bot cleanly leaves and status updates reach bot-manager
-6. **Timeout handling:** Test alone-timeout, admission-timeout, and removal detection
+1. **Test lobby flow** (if meeting has lobby enabled)
+2. **Test direct join** (no lobby)
+3. **Test removal detection** (`meeting:removed` event)
+4. **Test meeting end** (`meeting:ended` event)
 
-### Phase 4: End-to-End
+### Phase 4: Bot-Manager Integration
+
+1. **Add Webex to platform enum**
+2. **Add `access_token` to API schema**
+3. **Wire up `handleWebex` in `index.ts`**
+4. **Test full container lifecycle**
+5. **Test with bot token (not just personal token)**
+
+### Phase 5: End-to-End
 
 - Full flow: API request → bot-manager → container → join Webex → transcribe → leave → transcript stored
 - Test with multiple participants switching speakers
-- Test with meeting password
-- Test lobby admission and rejection
+- Test with OAuth token (if implementing OAuth)
+- Test alone-timeout and admission-timeout
 
 ### Test Infrastructure
 
 ```
 testing/
   webex/
-    test_selectors.ts       # Selector validation
-    test_join_flow.ts       # Join flow with real Webex meeting
+    test_sdk_init.ts        # SDK initialization and join
     test_audio_capture.ts   # Audio pipeline verification
+    test_events.ts          # Event handling (state changes, removal)
     test_e2e.ts             # Full end-to-end test
 ```
 
@@ -501,84 +1078,112 @@ testing/
 
 | Risk | Impact | Mitigation |
 |------|--------|------------|
-| **Webex bot detection** | Bot blocked from joining | Use stealth plugin, realistic user agent, add human-like delays. Consider rotating user agents. |
-| **Webex UI changes** | Selectors break silently | Build selector arrays with multiple fallbacks (like Google Meet). Add screenshot checkpoints. Monitor for failures. |
-| **No audio elements in DOM** | DOM fallback unusable | Primary approach is now RTCPeerConnection interception — works regardless of DOM audio elements. DOM scan is the fallback, not primary. |
-| **Webex requires sign-in** | Can't join as guest | Some Webex meetings don't allow guests. Document this limitation. Consider implementing Webex OAuth for authenticated join. |
+| **SDK version changes/deprecation** | Breaking changes in new SDK releases | Pin SDK version in `meeting.html` (`webex@^3`). Monitor release notes. Add version validation. |
+| **Authentication token management** | Expired tokens → join failures | Implement token refresh logic for OAuth. Document Personal Token 12h expiration. Validate token before join. |
+| **SDK CDN availability** | CDN outage → bot can't join | Consider hosting SDK locally (download from npm, serve from container). Add fallback CDN. |
 
 ### Medium Risk
 
 | Risk | Impact | Mitigation |
 |------|--------|------------|
-| **Meeting password handling** | Bot can't join password-protected meetings | Accept password via `MeetingCreate.passcode` field (already exists). Auto-fill in join flow. |
-| **Webex rate limiting** | Repeated joins throttled | Implement exponential backoff. Log rate limit headers. |
-| **Different Webex editions** | UI differs between Webex Free/Business/Enterprise | Test across editions. Build flexible selector arrays. |
+| **SDK requires sign-in for some meetings** | Can't join restricted meetings | Document limitation. Support both bot and user OAuth tokens. |
+| **Meeting password handling** | Bot can't join password-protected meetings | Accept password via `MeetingCreate.passcode` field. Pass to SDK if supported. |
 | **Content Security Policy** | Script injection blocked | Already handled: Playwright `bypassCSP: true` in context creation. |
+| **Different Webex editions** | Enterprise features differ from Free tier | Test across editions. Document edition-specific behavior. |
 
-### Low Risk
+### Low Risk (Previously High, Now Mitigated)
 
 | Risk | Impact | Mitigation |
 |------|--------|------------|
-| **Webex Messaging API changes** | Transcript delivery breaks | Messaging API is stable and well-documented. Use versioned endpoints. |
-| **Container resource usage** | Webex client heavier than Meet | Monitor memory/CPU. Adjust container resource limits if needed. |
+| ~~Webex UI changes~~ | ~~Selectors break~~ | **REMOVED:** No selectors used! SDK is stable API. |
+| ~~No audio elements in DOM~~ | ~~Can't capture audio~~ | **REMOVED:** SDK provides MediaStream directly. |
+| ~~Bot detection~~ | ~~Bot blocked~~ | **REDUCED:** SDK is official Webex API, less likely to be blocked. |
+| ~~Desktop app prompts~~ | ~~Join flow breaks~~ | **REMOVED:** No web UI interaction needed. |
+| ~~CAPTCHA~~ | ~~Can't join~~ | **REMOVED:** SDK authenticates via token, no CAPTCHA. |
 
 ---
 
 ## Implementation Phases
 
-### Phase 1: Selector Research & Join Flow (1-2 weeks)
-- [ ] Manual inspection of Webex web client DOM
-- [ ] Document all selectors in `selectors.ts`
-- [ ] Implement `join.ts` with screenshot checkpoints
-- [ ] Implement `admission.ts` (lobby detection)
-- [ ] Implement `leave.ts`
+### Phase 1: SDK Integration & Join Flow (3-5 days)
+- [ ] Create `meeting.html` (based on POC)
+- [ ] Implement `join.ts` (load HTML, inject config, call `initWebex()`)
+- [ ] Implement `admission.ts` (monitor SDK state changes)
+- [ ] Implement `leave.ts` (call `meeting.leave()`)
 - [ ] Add `"webex"` to Platform enum and BotConfig type
+- [ ] Test join flow with Personal Access Token
 
-### Phase 2: Audio Capture & Transcription (1-2 weeks)
-- [ ] Verify audio element discovery on Webex
-- [ ] Implement `recording.ts` (copy Google Meet pattern, swap selectors)
-- [ ] Test WhisperLive connection and audio pipeline
-- [ ] Implement speaker detection with Webex-specific indicators
-- [ ] Implement `removal.ts`
+### Phase 2: Audio Capture & Transcription (3-5 days)
+- [ ] Implement `recording.ts` (capture `remoteAudio` stream)
+- [ ] Connect audio to WhisperLive WebSocket
+- [ ] Test transcription pipeline
+- [ ] Implement speaker detection (SDK events or polling)
+- [ ] Implement `removal.ts` (monitor SDK events)
 
-### Phase 3: Bot-Manager Integration (3-5 days)
+### Phase 3: Bot-Manager Integration (2-3 days)
 - [ ] Add Webex URL construction to `construct_meeting_url`
+- [ ] Add `webex_access_token` field to API schema
 - [ ] Wire up `handleWebex` in `index.ts`
-- [ ] Add Webex to `performGracefulLeave` dispatch
 - [ ] Test full container lifecycle
+- [ ] Test with bot token (register bot at developer.webex.com)
 
-### Phase 4: Webex Messaging API (Optional, 3-5 days)
+### Phase 4: Authentication & Token Management (2-3 days)
+- [ ] Document authentication methods (Personal, Bot, OAuth, Guest)
+- [ ] Implement token validation before join
+- [ ] Add token refresh logic for OAuth (if implementing)
+- [ ] Security audit (token masking in logs, secure storage)
+
+### Phase 5: Webex Messaging API (Optional, 2-3 days)
 - [ ] Implement transcript delivery to Webex spaces
 - [ ] Add Webex bot token configuration
 - [ ] Test message posting
 
-### Phase 5: Hardening & Testing (1 week)
+### Phase 6: Hardening & Testing (3-5 days)
 - [ ] Write integration tests
-- [ ] Test edge cases (password, rejection, removal, alone timeout)
+- [ ] Test edge cases (lobby, rejection, removal, alone timeout)
 - [ ] Test across Webex editions (Free/Business)
 - [ ] Document known limitations
 - [ ] Update README
 
-**Estimated total: 4-6 weeks**
+**Estimated total: 2-3 weeks** (down from 4-6 weeks due to no selector research needed!)
+
+---
+
+## Appendix: Key Differences from Google Meet
+
+| Aspect | Google Meet | Webex (SDK Hybrid) |
+|--------|-------------|-------------------|
+| **Architecture** | DOM scraping via Playwright | SDK API calls |
+| **Join method** | Navigate to URL, click buttons | Load HTML, call `meeting.join()` |
+| **Selectors** | ~50-100 CSS/aria selectors | **None!** |
+| **Audio capture** | Find `<audio>` DOM elements | SDK provides MediaStream |
+| **WebRTC interception** | Patch `RTCPeerConnection.prototype` | **Not needed!** |
+| **Speaker detection** | MutationObserver on DOM | SDK events (`activeSpeakerChanged`) |
+| **Lobby/admission** | Poll DOM for lobby indicators | SDK state change events |
+| **Leave meeting** | Click button via selector | Call `meeting.leave()` |
+| **Removal detection** | Poll DOM for removal message | SDK `meeting:removed` event |
+| **Credentials** | None (anonymous guest) | **Required** (access token) |
+| **Fragility** | High (UI changes break selectors) | Low (SDK is stable API) |
+| **Maintenance** | Ongoing selector updates | Minimal (SDK version updates) |
 
 ---
 
 ## Appendix: Reference Implementation Files
 
-When implementing, use these existing files as direct templates:
+When implementing, use these existing files as templates for **structure** (not selectors):
 
-| New Webex File | Template File |
-|----------------|---------------|
-| `platforms/webex/index.ts` | `platforms/googlemeet/index.ts` |
-| `platforms/webex/join.ts` | `platforms/googlemeet/join.ts` |
-| `platforms/webex/admission.ts` | `platforms/googlemeet/admission.ts` |
-| `platforms/webex/recording.ts` | `platforms/googlemeet/recording.ts` |
-| `platforms/webex/removal.ts` | `platforms/googlemeet/removal.ts` |
-| `platforms/webex/leave.ts` | `platforms/googlemeet/leave.ts` |
-| `platforms/webex/selectors.ts` | `platforms/googlemeet/selectors.ts` |
+| New Webex File | Template File (Structure Reference) | Key Changes |
+|----------------|-------------------------------------|-------------|
+| `platforms/webex/index.ts` | `platforms/googlemeet/index.ts` | Add token validation |
+| `platforms/webex/join.ts` | `platforms/googlemeet/join.ts` | Replace DOM navigation with SDK calls |
+| `platforms/webex/admission.ts` | `platforms/googlemeet/admission.ts` | Replace DOM polling with SDK events |
+| `platforms/webex/recording.ts` | `platforms/googlemeet/recording.ts` | Simpler: SDK gives MediaStream directly |
+| `platforms/webex/removal.ts` | `platforms/googlemeet/removal.ts` | Replace DOM polling with SDK events |
+| `platforms/webex/leave.ts` | `platforms/googlemeet/leave.ts` | Replace selector click with SDK call |
+| `platforms/webex/meeting.html` | `poc/webex-sdk-hybrid/meeting.html` | POC is the actual implementation base! |
 
-The Google Meet implementation is the closest analog because both platforms:
-- Use Chrome/Chromium (not Edge like Teams)
-- Support guest joining via web
-- Have similar lobby/admission flows
-- Render audio through standard HTML media elements
+**Note:** The POC branch `poc/webex-sdk-hybrid` contains the **actual working implementation** of the SDK integration. The Google Meet files are only referenced for **code structure patterns** (error handling, logging, strategy interface), NOT for selector logic.
+
+---
+
+**Status:** ✅ Implementation plan updated to SDK-based hybrid architecture (validated by POC)
