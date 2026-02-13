@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Webex SDK Host</title>
+</head>
+<body>
+  <h1>Webex Meeting Bot</h1>
+  <div id="status">Initializing...</div>
+  
+  <!-- Load Webex SDK from CDN -->
+  <script crossorigin src="https://unpkg.com/webex@^3/umd/webex.min.js"></script>
+  
+  <script>
+    // Global state exposed to Playwright
+    window.__WEBEX_STATUS = {
+      initialized: false,
+      registered: false,
+      meetingCreated: false,
+      joined: false,
+      audioReady: false,
+      meetingState: null,
+      error: null,
+      removed: false,
+      ended: false,
+      removalReason: null
+    };
+    
+    window.__WEBEX_LOGS = [];
+    window.__WEBEX_AUDIO_STREAM = null;
+    window.__WEBEX_INSTANCE = null;
+    window.__WEBEX_MEETING = null;
+    window.__WEBEX_CONFIG = null;
+    
+    function log(message, data) {
+      const logEntry = {
+        timestamp: new Date().toISOString(),
+        message,
+        data: data || null
+      };
+      window.__WEBEX_LOGS.push(logEntry);
+      console.log(`[WEBEX] ${message}`, data || '');
+      const statusDiv = document.getElementById('status');
+      if (statusDiv) {
+        statusDiv.innerText = message;
+      }
+    }
+    
+    // Initialize Webex and join meeting
+    window.initWebex = async function() {
+      try {
+        if (!window.__WEBEX_CONFIG) {
+          throw new Error('Missing __WEBEX_CONFIG (access_token and meetingUrl required)');
+        }
+        
+        log('Initializing Webex SDK...');
+        
+        const webex = window.Webex.init({
+          credentials: {
+            access_token: window.__WEBEX_CONFIG.access_token
+          }
+        });
+        
+        window.__WEBEX_INSTANCE = webex;
+        window.__WEBEX_STATUS.initialized = true;
+        log('SDK initialized');
+        
+        // Register with Webex
+        log('Registering with Webex...');
+        await webex.meetings.register();
+        window.__WEBEX_STATUS.registered = true;
+        log('Registration successful');
+        
+        // Create meeting
+        const destination = window.__WEBEX_CONFIG.meetingUrl;
+        log('Creating meeting...', { destination });
+        const meeting = await webex.meetings.create(destination);
+        window.__WEBEX_MEETING = meeting;
+        window.__WEBEX_STATUS.meetingCreated = true;
+        log('Meeting created', { meetingId: meeting.id });
+        
+        // Bind event handlers
+        meeting.on('media:ready', (media) => {
+          log('Media ready', { type: media.type });
+          
+          if (media.type === 'remoteAudio') {
+            window.__WEBEX_AUDIO_STREAM = media.stream;
+            window.__WEBEX_STATUS.audioReady = true;
+            log('Remote audio stream available', {
+              tracks: media.stream.getTracks().length,
+              trackInfo: media.stream.getTracks().map(t => ({
+                kind: t.kind,
+                id: t.id,
+                label: t.label,
+                enabled: t.enabled,
+                muted: t.muted,
+                readyState: t.readyState
+              }))
+            });
+          }
+        });
+        
+        meeting.on('media:stopped', (media) => {
+          log('Media stopped', { type: media.type });
+          if (media.type === 'remoteAudio') {
+            window.__WEBEX_AUDIO_STREAM = null;
+            window.__WEBEX_STATUS.audioReady = false;
+          }
+        });
+        
+        meeting.on('error', (err) => {
+          log('Meeting error', { error: err.message, stack: err.stack });
+          window.__WEBEX_STATUS.error = err.message;
+        });
+        
+        meeting.on('meeting:stateChange', (state) => {
+          log('Meeting state changed', state);
+          window.__WEBEX_STATUS.meetingState = state.current || state;
+        });
+        
+        meeting.on('meeting:removed', (reason) => {
+          log('Bot was removed from meeting', reason);
+          window.__WEBEX_STATUS.removed = true;
+          window.__WEBEX_STATUS.removalReason = reason?.type || 'unknown';
+        });
+        
+        meeting.on('meeting:ended', () => {
+          log('Meeting ended by host');
+          window.__WEBEX_STATUS.ended = true;
+        });
+        
+        // Track members for participant count
+        meeting.on('members:update', (delta) => {
+          log('Members updated', {
+            added: delta?.added?.length || 0,
+            removed: delta?.removed?.length || 0,
+            total: meeting.members?.membersCollection?.length || 0
+          });
+        });
+        
+        // Track active speaker changes
+        meeting.on('meeting:activeSpeakerChanged', (payload) => {
+          const speaker = payload.activeSpeaker;
+          log('Active speaker changed', {
+            speakerId: speaker?.id,
+            speakerName: speaker?.name
+          });
+        });
+        
+        // Join meeting (audio only, no video/mic to keep it simple)
+        log('Joining meeting...');
+        const meetingOptions = {
+          mediaOptions: {
+            receiveAudio: true,
+            receiveVideo: false,
+            sendAudio: false,
+            sendVideo: false
+          }
+        };
+        
+        if (window.__WEBEX_CONFIG.displayName) {
+          log('Using display name: ' + window.__WEBEX_CONFIG.displayName);
+        }
+        
+        await meeting.join(meetingOptions);
+        window.__WEBEX_STATUS.joined = true;
+        log('Joined meeting successfully');
+        
+        return { success: true };
+        
+      } catch (err) {
+        log('Error during initialization', { error: err.message, stack: err.stack });
+        window.__WEBEX_STATUS.error = err.message;
+        throw err;
+      }
+    };
+    
+    // Leave meeting
+    window.leaveMeeting = async function() {
+      try {
+        if (window.__WEBEX_MEETING) {
+          log('Leaving meeting...');
+          await window.__WEBEX_MEETING.leave();
+          log('Left meeting successfully');
+          return { success: true };
+        } else {
+          log('No active meeting to leave');
+          return { success: false, reason: 'no_active_meeting' };
+        }
+      } catch (err) {
+        log('Error leaving meeting', { error: err.message, stack: err.stack });
+        throw err;
+      }
+    };
+    
+    // Get audio stream
+    window.getAudioStream = function() {
+      return window.__WEBEX_AUDIO_STREAM;
+    };
+    
+    // Get meeting status
+    window.getMeetingStatus = function() {
+      return window.__WEBEX_STATUS;
+    };
+    
+    // Get participant count
+    window.getParticipantCount = function() {
+      try {
+        const meeting = window.__WEBEX_MEETING;
+        if (meeting && meeting.members && meeting.members.membersCollection) {
+          return meeting.members.membersCollection.length;
+        }
+        return 0;
+      } catch (err) {
+        log('Error getting participant count', { error: err.message });
+        return 0;
+      }
+    };
+    
+    log('Page loaded, waiting for config...');
+  </script>
+</body>
+</html>
