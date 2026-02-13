@@ -237,32 +237,50 @@ The bot-manager `construct_meeting_url` should normalize these. For the initial 
 
 ## Audio Capture Strategy
 
-### Recommended: Browser MediaStream Capture (Same as Google Meet)
+### Primary: RTCPeerConnection Interception (No DOM Audio Elements Required)
 
-The proven approach used for Google Meet works for Webex:
+Webex may not render audio through `<audio>`/`<video>` DOM elements — it likely handles audio purely via WebRTC peer connections. Therefore, the **primary** capture strategy intercepts WebRTC directly, which works regardless of how Webex renders audio:
 
-1. **Find media elements:** Use `BrowserAudioService.findMediaElements()` to locate `<audio>` and `<video>` elements in the DOM that carry meeting audio
-2. **Create combined stream:** `AudioContext` + `MediaStreamSource` → `MediaStreamDestination`
-3. **Process audio:** `ScriptProcessorNode` or `AudioWorklet` downsamples to 16kHz mono PCM
-4. **Send to WhisperLive:** Via WebSocket from browser context
-
-**Why not Cisco Browser SDK?**
-- The Cisco Browser SDK (`webex-js-sdk`) requires OAuth credentials and app registration
-- It's designed for building Webex-integrated apps, not for joining arbitrary meetings as a guest
-- Using Playwright to join via web client is simpler and doesn't require Webex API credentials
-- The web client already handles all the WebRTC negotiation
-
-### Audio Element Discovery
-
-Webex's web client renders audio through standard HTML5 `<audio>` or `<video>` elements with `srcObject` set to `MediaStream`. The `BrowserAudioService.findMediaElements()` method (shared with Google Meet) scans for these:
+1. **Before page loads**, inject a hook via `page.evaluateOnNewDocument()` that patches `RTCPeerConnection.prototype`:
+   - Intercept `ontrack` events to capture incoming audio `MediaStreamTrack`s
+   - Alternatively, wrap `addTrack`/`addTransceiver` to catch outbound tracks
+2. **Collect audio tracks** as the WebRTC connection negotiates — each remote audio track represents a participant's audio
+3. **Feed into AudioContext:** `MediaStreamSource` → `ScriptProcessorNode`/`AudioWorklet` → downsample to 16kHz mono PCM
+4. **Send to WhisperLive** via WebSocket from browser context (same pipeline as Google Meet)
 
 ```javascript
-// Already implemented in browser-utils.global.js
+// Injected before page loads via page.evaluateOnNewDocument()
+const originalRTCPeerConnection = window.RTCPeerConnection;
+window.RTCPeerConnection = function(...args) {
+  const pc = new originalRTCPeerConnection(...args);
+  pc.addEventListener('track', (event) => {
+    if (event.track.kind === 'audio') {
+      // Feed track into shared AudioContext for capture
+      window.__vexaAudioCapture?.addTrack(event.track, event.streams[0]);
+    }
+  });
+  return pc;
+};
+```
+
+**Why not Cisco Browser SDK?**
+- Requires OAuth credentials and app registration
+- Designed for building Webex-integrated apps, not joining arbitrary meetings as a guest
+- Playwright web client approach needs no Webex API credentials
+- The web client handles all WebRTC negotiation — we just intercept the resulting audio
+
+### Fallback: DOM Audio Element Discovery
+
+If Webex does render audio through DOM elements, the existing `BrowserAudioService.findMediaElements()` method works as a fallback:
+
+```javascript
 const elements = document.querySelectorAll('audio, video');
 const active = Array.from(elements).filter(el => 
   el.srcObject && el.srcObject.getAudioTracks().length > 0
 );
 ```
+
+**Strategy order:** Try RTCPeerConnection interception first (always available). If no tracks arrive within 10s of joining, fall back to DOM element scanning.
 
 ### Speaker Detection
 
@@ -485,7 +503,7 @@ testing/
 |------|--------|------------|
 | **Webex bot detection** | Bot blocked from joining | Use stealth plugin, realistic user agent, add human-like delays. Consider rotating user agents. |
 | **Webex UI changes** | Selectors break silently | Build selector arrays with multiple fallbacks (like Google Meet). Add screenshot checkpoints. Monitor for failures. |
-| **No audio elements in DOM** | Transcription fails entirely | Webex may use WebRTC directly without `<audio>` elements. Fallback: intercept `RTCPeerConnection` and extract audio tracks programmatically. |
+| **No audio elements in DOM** | DOM fallback unusable | Primary approach is now RTCPeerConnection interception — works regardless of DOM audio elements. DOM scan is the fallback, not primary. |
 | **Webex requires sign-in** | Can't join as guest | Some Webex meetings don't allow guests. Document this limitation. Consider implementing Webex OAuth for authenticated join. |
 
 ### Medium Risk
