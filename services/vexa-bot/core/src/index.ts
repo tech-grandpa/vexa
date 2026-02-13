@@ -4,6 +4,7 @@ import { callStatusChangeCallback, mapExitReasonToStatus } from "./services/unif
 import { chromium } from "playwright-extra";
 import { handleGoogleMeet, leaveGoogleMeet } from "./platforms/googlemeet";
 import { handleMicrosoftTeams, leaveMicrosoftTeams } from "./platforms/msteams";
+import { handleWebex, leaveWebex } from "./platforms/webex";
 import { browserArgs, userAgent } from "./constans";
 import { BotConfig } from "./types";
 import { createClient, RedisClientType } from 'redis';
@@ -16,7 +17,7 @@ let currentTask: string | null | undefined = 'transcribe'; // Default task
 let currentRedisUrl: string | null = null;
 let currentConnectionId: string | null = null;
 let botManagerCallbackUrl: string | null = null; // ADDED: To store callback URL
-let currentPlatform: "google_meet" | "zoom" | "teams" | undefined;
+let currentPlatform: "google_meet" | "zoom" | "teams" | "webex" | undefined;
 let page: Page | null = null; // Initialize page, will be set in runBot
 
 // --- ADDED: Flag to prevent multiple shutdowns ---
@@ -234,6 +235,8 @@ async function performGracefulLeave(
          platformLeaveSuccess = await leaveGoogleMeet(page);
       } else if (currentPlatform === "teams") {
          platformLeaveSuccess = await leaveMicrosoftTeams(page);
+      } else if (currentPlatform === "webex") {
+         platformLeaveSuccess = await leaveWebex(page);
       } else {
          log(`[Graceful Leave] No platform-specific leave defined for ${currentPlatform}. Page will be closed.`);
          // If no specific leave, we still consider it "handled" to proceed with cleanup.
@@ -500,6 +503,8 @@ export async function runBot(botConfig: BotConfig): Promise<void> {// Store botC
       await performGracefulLeave(page, 1, "platform_not_implemented");
     } else if (botConfig.platform === "teams") {
       await handleMicrosoftTeams(botConfig, page, performGracefulLeave);
+    } else if (botConfig.platform === "webex") {
+      await handleWebex(botConfig, page, performGracefulLeave);
     } else {
       log(`Unknown platform: ${botConfig.platform}`);
       await performGracefulLeave(page, 1, "unknown_platform");

@@ -1,5 +1,5 @@
 export type BotConfig = {
-  platform: "google_meet" | "zoom" | "teams",
+  platform: "google_meet" | "zoom" | "teams" | "webex",
   meetingUrl: string | null,
   botName: string,
   token: string,  // MeetingToken (HS256 JWT)
@@ -17,4 +17,8 @@ export type BotConfig = {
   reconnectionIntervalMs?: number,
   meeting_id: number,  // Required, not optional
   botManagerCallbackUrl?: string;
+  data?: {
+    access_token?: string;  // Required for Webex platform
+    [key: string]: any;
+  };
 }
