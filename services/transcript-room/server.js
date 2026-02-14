@@ -10,16 +10,15 @@ const MAX_SEGMENTS_PER_ROOM = parseInt(process.env.MAX_SEGMENTS_PER_ROOM || '100
 const MAX_VIEWERS_PER_ROOM = parseInt(process.env.MAX_VIEWERS_PER_ROOM || '20', 10);
 const DEFAULT_TTL_MINUTES = parseInt(process.env.DEFAULT_TTL_MINUTES || '30', 10);
 const ROOM_SECRET = process.env.ROOM_SECRET || null;
+const CORS_ORIGIN = process.env.CORS_ORIGIN || '*';
+const MAX_BODY_BYTES = parseInt(process.env.MAX_BODY_BYTES || String(1024 * 1024), 10);
+const MAX_SEGMENT_TEXT_LENGTH = 10000;
+const MAX_SPEAKER_LENGTH = 200;
 
 function checkRoomSecret(req) {
   if (!ROOM_SECRET) return true; // dev mode — no auth required
   const headerSecret = req.headers['x-room-secret'];
   if (headerSecret === ROOM_SECRET) return true;
-  // Also check query parameter (for WebSocket clients that can't set custom headers)
-  try {
-    const url = new URL(req.url, `http://${req.headers.host}`);
-    if (url.searchParams.get('secret') === ROOM_SECRET) return true;
-  } catch {}
   return false;
 }
 
@@ -27,7 +26,7 @@ function checkRoomSecret(req) {
 const rooms = new Map(); // token → room
 
 function createRoom({ meetingId, hostEmail, ttlMinutes = DEFAULT_TTL_MINUTES }) {
-  const token = crypto.randomBytes(16).toString('hex');
+  const token = crypto.randomBytes(32).toString('hex');
   const room = {
     token,
     meetingId: meetingId || null,
@@ -84,7 +83,7 @@ const server = http.createServer((req, res) => {
   const method = req.method;
 
   // CORS headers
-  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Origin', CORS_ORIGIN);
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Room-Secret');
   if (method === 'OPTIONS') { res.writeHead(204); return res.end(); }
@@ -106,7 +105,7 @@ const server = http.createServer((req, res) => {
 
   // Room-specific routes
   let m;
-  if ((m = path.match(/^\/api\/room\/([a-f0-9]{32})\/stream$/))) {
+  if ((m = path.match(/^\/api\/room\/([a-f0-9]{64})\/stream$/))) {
     const room = rooms.get(m[1]);
     if (!room) return json(res, 404, { error: 'Room not found' });
     if (room.sseClients.size >= MAX_VIEWERS_PER_ROOM) return json(res, 429, { error: 'Too many viewers for this room' });
@@ -124,7 +123,7 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  if ((m = path.match(/^\/api\/room\/([a-f0-9]{32})\/transcript$/))) {
+  if ((m = path.match(/^\/api\/room\/([a-f0-9]{64})\/transcript$/))) {
     const room = rooms.get(m[1]);
     if (!room) return json(res, 404, { error: 'Room not found' });
     if (url.searchParams.get('format') === 'text') {
@@ -134,7 +133,7 @@ const server = http.createServer((req, res) => {
     return json(res, 200, { segments: room.segments, count: room.segments.length });
   }
 
-  if ((m = path.match(/^\/api\/room\/([a-f0-9]{32})$/))) {
+  if ((m = path.match(/^\/api\/room\/([a-f0-9]{64})$/))) {
     if (method === 'GET') {
       const room = rooms.get(m[1]);
       if (!room) return json(res, 404, { error: 'Room not found' });
@@ -148,7 +147,7 @@ const server = http.createServer((req, res) => {
     }
   }
 
-  if (method === 'POST' && (m = path.match(/^\/api\/room\/([a-f0-9]{32})\/end$/))) {
+  if (method === 'POST' && (m = path.match(/^\/api\/room\/([a-f0-9]{64})\/end$/))) {
     const room = rooms.get(m[1]);
     if (!room) return json(res, 404, { error: 'Room not found' });
     if (room.endedAt) return json(res, 400, { error: 'Room already ended' });
@@ -157,7 +156,7 @@ const server = http.createServer((req, res) => {
   }
 
   // Viewer — /{token}
-  if ((m = path.match(/^\/([a-f0-9]{32})$/))) {
+  if ((m = path.match(/^\/([a-f0-9]{64})$/))) {
     const room = rooms.get(m[1]);
     if (!room) { res.writeHead(404); return res.end('Room not found'); }
     // Serve external viewer.html with token injected
@@ -169,7 +168,10 @@ const server = http.createServer((req, res) => {
       // Fallback to inline viewer if file missing
       html = viewerHTML(m[1]);
     }
-    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.writeHead(200, {
+      'Content-Type': 'text/html',
+      'Content-Security-Policy': "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; script-src 'self' 'unsafe-inline'; img-src 'self' data:",
+    });
     return res.end(html);
   }
 
@@ -185,24 +187,41 @@ const wss = new WebSocketServer({ noServer: true });
 
 server.on('upgrade', (req, socket, head) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
-  const m = url.pathname.match(/^\/ws\/ingest\/([a-f0-9]{32})$/);
+  const m = url.pathname.match(/^\/ws\/ingest\/([a-f0-9]{64})$/);
   if (!m) { socket.destroy(); return; }
-  if (!checkRoomSecret(req)) { socket.destroy(); return; }
   const room = rooms.get(m[1]);
   if (!room || room.endedAt) { socket.destroy(); return; }
   wss.handleUpgrade(req, socket, head, ws => {
-    ws.on('message', raw => {
+    let authenticated = !ROOM_SECRET; // skip auth if no secret configured
+
+    const handleSegment = (raw) => {
       try {
         const seg = JSON.parse(raw);
         const segment = {
-          text: String(seg.text || ''),
+          text: String(seg.text || '').slice(0, MAX_SEGMENT_TEXT_LENGTH),
           timestamp: seg.timestamp || new Date().toISOString(),
-          speaker: seg.speaker || null,
+          speaker: seg.speaker ? String(seg.speaker).slice(0, MAX_SPEAKER_LENGTH) : null,
         };
         room.segments.push(segment);
         while (room.segments.length > MAX_SEGMENTS_PER_ROOM) room.segments.shift();
         broadcastSSE(room, { type: 'segment', ...segment });
       } catch {}
+    };
+
+    ws.on('message', raw => {
+      if (!authenticated) {
+        // First message must be auth
+        try {
+          const msg = JSON.parse(raw);
+          if (msg.type === 'auth' && msg.secret === ROOM_SECRET) {
+            authenticated = true;
+            return;
+          }
+        } catch {}
+        ws.close(4001, 'Authentication failed');
+        return;
+      }
+      handleSegment(raw);
     });
   });
 });
@@ -215,7 +234,16 @@ function json(res, code, obj) {
 
 function readBody(req, cb) {
   let d = '';
-  req.on('data', c => d += c);
+  let bytes = 0;
+  req.on('data', c => {
+    bytes += Buffer.byteLength(c);
+    if (bytes > MAX_BODY_BYTES) {
+      req.destroy();
+      cb({});
+      return;
+    }
+    d += c;
+  });
   req.on('end', () => { try { cb(JSON.parse(d || '{}')); } catch { cb({}); } });
 }
 

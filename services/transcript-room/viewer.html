@@ -594,6 +594,7 @@ function connect() {
       st.className = 'connecting';
       st.innerHTML = '<span>Reconnecting…</span>';
     }
+    // TODO: Add exponential backoff for reconnect (currently fixed 2s interval)
     setTimeout(connect, 2000);
   };
 }

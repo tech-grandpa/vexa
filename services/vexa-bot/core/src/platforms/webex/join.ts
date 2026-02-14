@@ -18,6 +18,12 @@ function startLocalServer(htmlPath: string): Promise<{ server: http.Server; port
     const htmlContent = fs.readFileSync(htmlPath, "utf-8");
 
     const server = http.createServer((req, res) => {
+      // Only serve meeting.html — reject all other paths
+      if (req.url !== '/' && !req.url?.startsWith('/meeting.html')) {
+        res.writeHead(404);
+        res.end('Not found');
+        return;
+      }
       res.writeHead(200, {
         "Content-Type": "text/html; charset=utf-8",
         "Cache-Control": "no-cache",

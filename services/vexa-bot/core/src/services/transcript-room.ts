@@ -140,18 +140,23 @@ export class TranscriptRoomClient {
       );
     }
 
-    let wsUrl = this.room.ingestUrl;
-    // Append secret as query parameter for WebSocket auth (can't set custom headers)
-    if (this.config.secret) {
-      const sep = wsUrl.includes('?') ? '&' : '?';
-      wsUrl += `${sep}secret=${encodeURIComponent(this.config.secret)}`;
-    }
-    log(`[TranscriptRoom] Connecting ingest WebSocket: ${this.room.ingestUrl}`);
+    const wsUrl = this.room.ingestUrl;
+    log(`[TranscriptRoom] Connecting ingest WebSocket: ${wsUrl}`);
 
     this.ws = new globalThis.WebSocket(wsUrl);
 
     this.ws.onopen = () => {
       log('[TranscriptRoom] Ingest WebSocket connected');
+      // Send auth message as the FIRST message if secret is configured
+      if (this.config.secret) {
+        try {
+          this.ws!.send(JSON.stringify({ type: 'auth', secret: this.config.secret }));
+          log('[TranscriptRoom] Auth message sent');
+        } catch (err: any) {
+          log(`[TranscriptRoom] Error sending auth message: ${err.message}`);
+          return;
+        }
+      }
       // Flush queued segments
       while (this.segmentQueue.length > 0) {
         const seg = this.segmentQueue.shift()!;
@@ -187,6 +192,10 @@ export class TranscriptRoomClient {
       headers,
       body,
     });
+    if (!resp.ok) {
+      const errBody = await resp.text();
+      throw new Error(`HTTP ${resp.status}: ${errBody}`);
+    }
     const text = await resp.text();
     try { return JSON.parse(text); }
     catch { return text as any; }

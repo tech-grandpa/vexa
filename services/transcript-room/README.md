@@ -29,7 +29,15 @@ npm start        # listens on :8790
 4. When meeting ends, bot calls `/end` — room expires after `ttlMinutes` (default 60)
 5. All data is deleted from memory on expiry
 
+## Security
+
+- **Token-only auth:** Transcript access is currently authorized by room token only (bearer-token-like). Anyone with the viewer URL can read the transcript. This is by design for frictionless ephemeral sharing. Future improvement: require ROOM_SECRET or a viewer-specific token for page access.
+- **No TLS:** Communication between the bot and transcript-room is plain HTTP/WS within the Docker network. The ROOM_SECRET travels in cleartext headers. This is acceptable for same-host Docker deployments. If services are split across hosts, use a reverse proxy with TLS or Docker overlay encryption.
+
 ## Environment
 
 - `PORT` — server port (default: 8790)
 - `BASE_URL` — public base URL for generated links
+- `CORS_ORIGIN` — Access-Control-Allow-Origin value (default: `*`)
+- `MAX_BODY_BYTES` — maximum request body size in bytes (default: 1048576)
+- `ROOM_SECRET` — shared secret for room authentication

@@ -11,10 +11,10 @@
   
   <!-- Load Webex SDK from CDN -->
   <!-- Pin SDK version to avoid unexpected breakage from minor releases -->
-  <script crossorigin src="https://unpkg.com/webex@3.7.0/umd/webex.min.js"></script>
+  <script crossorigin="anonymous" integrity="sha384-AStSRbsq4tv/850MxukZeFavu5RvbyTN7jCR+imXMviF+lQWiP+xNwAHV1IgVinv" src="https://unpkg.com/webex@3.7.0/umd/webex.min.js"></script>
   <script>
     if (!window.Webex) {
-      document.getElementById('status').innerText = 'ERROR: Webex SDK failed to load from CDN';
+      document.getElementById('status').textContent = 'ERROR: Webex SDK failed to load from CDN';
       console.error('[WEBEX] SDK failed to load from unpkg.com CDN');
     }
   </script>
@@ -38,6 +38,10 @@
     window.__WEBEX_AUDIO_STREAM = null;
     window.__WEBEX_INSTANCE = null;
     window.__WEBEX_MEETING = null;
+    // SECURITY NOTE: The access_token is exposed in browser context via __WEBEX_CONFIG.
+    // This is inherent to the Webex JS SDK architecture (client-side only).
+    // Mitigations: page runs in headless Playwright with no user-facing content,
+    // and the local HTTP server binds to 127.0.0.1 only.
     window.__WEBEX_CONFIG = null;
     
     function log(message, data) {
@@ -50,7 +54,7 @@
       console.log(`[WEBEX] ${message}`, data || '');
       const statusDiv = document.getElementById('status');
       if (statusDiv) {
-        statusDiv.innerText = message;
+        statusDiv.textContent = message;
       }
     }
     
@@ -144,7 +148,7 @@
         });
         
         meeting.on('error', (err) => {
-          log('Meeting error', { error: err.message, stack: err.stack });
+          log('Meeting error', { error: err.message });
           window.__WEBEX_STATUS.error = err.message;
         });
         
@@ -196,7 +200,7 @@
         return { success: true };
         
       } catch (err) {
-        log('Error during initialization', { error: err.message, stack: err.stack });
+        log('Error during initialization', { error: err.message });
         window.__WEBEX_STATUS.error = err.message;
         throw err;
       }
@@ -220,7 +224,7 @@
         log('Media added successfully');
         return { success: true };
       } catch (err) {
-        log('Error adding media', { error: err.message, stack: err.stack });
+        log('Error adding media', { error: err.message });
         throw err;
       }
     };
@@ -238,7 +242,7 @@
           return { success: false, reason: 'no_active_meeting' };
         }
       } catch (err) {
-        log('Error leaving meeting', { error: err.message, stack: err.stack });
+        log('Error leaving meeting', { error: err.message });
         throw err;
       }
     };
