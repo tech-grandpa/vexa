@@ -1,5 +1,4 @@
 import { log } from '../utils';
-import WebSocket from 'ws';
 import http from 'http';
 
 export interface TranscriptRoomConfig {
@@ -16,7 +15,7 @@ export interface TranscriptRoom {
 export class TranscriptRoomClient {
   private config: TranscriptRoomConfig;
   private room: TranscriptRoom | null = null;
-  private ws: WebSocket | null = null;
+  private ws: globalThis.WebSocket | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(config: TranscriptRoomConfig) {
@@ -47,7 +46,7 @@ export class TranscriptRoomClient {
    * Send a transcript segment to the room.
    */
   sendSegment(text: string, speaker?: string, timestamp?: string): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+    if (!this.ws || this.ws.readyState !== globalThis.WebSocket.OPEN) {
       log('[TranscriptRoom] WebSocket not open, queuing not implemented — segment dropped');
       return;
     }
@@ -125,23 +124,23 @@ export class TranscriptRoomClient {
     const wsUrl = this.room.ingestUrl;
     log(`[TranscriptRoom] Connecting ingest WebSocket: ${wsUrl}`);
 
-    this.ws = new WebSocket(wsUrl);
+    this.ws = new globalThis.WebSocket(wsUrl);
 
-    this.ws.on('open', () => {
+    this.ws.onopen = () => {
       log('[TranscriptRoom] Ingest WebSocket connected');
-    });
+    };
 
-    this.ws.on('close', () => {
+    this.ws.onclose = () => {
       log('[TranscriptRoom] Ingest WebSocket closed');
       // Reconnect if room still active
       if (this.room) {
         this.reconnectTimer = setTimeout(() => this.connectIngest(), 3000);
       }
-    });
+    };
 
-    this.ws.on('error', (err) => {
-      log(`[TranscriptRoom] Ingest WebSocket error: ${err.message}`);
-    });
+    this.ws.onerror = (ev) => {
+      log(`[TranscriptRoom] Ingest WebSocket error`);
+    };
   }
 
   private httpPost<T = any>(url: string, body: string): Promise<T> {
