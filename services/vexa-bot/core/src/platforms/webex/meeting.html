@@ -169,24 +169,29 @@
           });
         });
         
-        // Join meeting (audio only, no video/mic to keep it simple)
+        // Join meeting (signaling only — media is set up separately via addMedia)
         log('Joining meeting...');
-        const meetingOptions = {
+        
+        if (window.__WEBEX_CONFIG.displayName) {
+          log('Using display name: ' + window.__WEBEX_CONFIG.displayName);
+        }
+        
+        await meeting.join();
+        window.__WEBEX_STATUS.joined = true;
+        log('Joined meeting successfully');
+        
+        // Set up media connection (audio only, no video/mic)
+        // This is required for the SDK to negotiate WebRTC and fire media:ready events
+        log('Adding media (receive audio only)...');
+        await meeting.addMedia({
           mediaOptions: {
             receiveAudio: true,
             receiveVideo: false,
             sendAudio: false,
             sendVideo: false
           }
-        };
-        
-        if (window.__WEBEX_CONFIG.displayName) {
-          log('Using display name: ' + window.__WEBEX_CONFIG.displayName);
-        }
-        
-        await meeting.join(meetingOptions);
-        window.__WEBEX_STATUS.joined = true;
-        log('Joined meeting successfully');
+        });
+        log('Media added successfully');
         
         return { success: true };
         
