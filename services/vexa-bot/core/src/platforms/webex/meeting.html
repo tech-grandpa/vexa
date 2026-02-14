@@ -191,12 +191,25 @@
         
         await meeting.join();
         window.__WEBEX_STATUS.joined = true;
-        log('Joined meeting successfully');
+        log('Joined meeting successfully (signaling only)');
         
-        // Set up media connection (audio only, no video/mic)
-        // This is required for the SDK to negotiate WebRTC and fire media:ready events
+        return { success: true };
+        
+      } catch (err) {
+        log('Error during initialization', { error: err.message, stack: err.stack });
+        window.__WEBEX_STATUS.error = err.message;
+        throw err;
+      }
+    };
+    
+    // Add media (call after admission/lobby)
+    window.addMeetingMedia = async function() {
+      try {
+        if (!window.__WEBEX_MEETING) {
+          throw new Error('No active meeting — call initWebex first');
+        }
         log('Adding media (receive audio only)...');
-        await meeting.addMedia({
+        await window.__WEBEX_MEETING.addMedia({
           mediaOptions: {
             receiveAudio: true,
             receiveVideo: false,
@@ -205,12 +218,9 @@
           }
         });
         log('Media added successfully');
-        
         return { success: true };
-        
       } catch (err) {
-        log('Error during initialization', { error: err.message, stack: err.stack });
-        window.__WEBEX_STATUS.error = err.message;
+        log('Error adding media', { error: err.message, stack: err.stack });
         throw err;
       }
     };
