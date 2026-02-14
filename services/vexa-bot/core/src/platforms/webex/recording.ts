@@ -2,7 +2,15 @@ import { Page } from "playwright";
 import { log } from "../../utils";
 import { BotConfig } from "../../types";
 import { WhisperLiveService } from "../../services/whisperlive";
+import { TranscriptRoomClient } from "../../services/transcript-room";
 import { ensureBrowserUtils } from "../../utils/injection";
+
+// Module-level transcript room client so leave.ts can access it
+let activeTranscriptRoom: TranscriptRoomClient | null = null;
+
+export function getActiveTranscriptRoom(): TranscriptRoomClient | null {
+  return activeTranscriptRoom;
+}
 
 export async function startWebexRecording(
   page: Page,
@@ -13,12 +21,41 @@ export async function startWebexRecording(
     whisperLiveUrl: process.env.WHISPER_LIVE_URL,
   });
 
+  // Initialize Transcript Room (ephemeral live viewer)
+  const transcriptRoomUrl = process.env.TRANSCRIPT_ROOM_URL || 'http://localhost:8790';
+  const transcriptRoom = new TranscriptRoomClient({ baseUrl: transcriptRoomUrl });
+  activeTranscriptRoom = transcriptRoom;
+
+  try {
+    const room = await transcriptRoom.createRoom(botConfig.meeting_id || botConfig.meetingUrl);
+    log(`[TranscriptRoom] Live viewer: ${room.viewerUrl}`);
+
+    // Post the viewer URL to Webex meeting chat if possible
+    if (botConfig.data?.access_token && botConfig.meetingUrl) {
+      try {
+        await postViewerUrlToMeeting(page, room.viewerUrl);
+      } catch (err: any) {
+        log(`[TranscriptRoom] Could not post viewer URL to meeting chat: ${err.message}`);
+      }
+    }
+  } catch (err: any) {
+    log(`[TranscriptRoom] Failed to create room (continuing without live viewer): ${err.message}`);
+    activeTranscriptRoom = null;
+  }
+
   // Initialize WhisperLive connection with STUBBORN reconnection
   const whisperLiveUrl =
     await whisperLiveService.initializeWithStubbornReconnection("Webex");
 
   log(`[Node.js] Using WhisperLive URL for Webex: ${whisperLiveUrl}`);
   log("Starting Webex recording with WebSocket connection");
+
+  // Expose transcript segment bridge: browser → Node.js → transcript room
+  await page.exposeFunction("__onTranscriptSegment", (text: string, speaker: string | null, timestamp: string) => {
+    if (activeTranscriptRoom) {
+      activeTranscriptRoom.sendSegment(text, speaker || undefined, timestamp);
+    }
+  });
 
   // Inject browser utilities
   await ensureBrowserUtils(
@@ -193,6 +230,15 @@ export async function startWebexRecording(
                 whisperLiveService,
                 (window as any).__vexaBotConfig
               );
+
+              // Forward finalized transcript segments to the live viewer room
+              if (data && data.text && data.text.trim()) {
+                (window as any).__onTranscriptSegment(
+                  data.text.trim(),
+                  data.speaker || data.participant_name || null,
+                  data.timestamp ? new Date(data.timestamp * 1000).toISOString() : new Date().toISOString()
+                );
+              }
             } catch (err: any) {
               (window as any).logBot(
                 `[WhisperLive] Error processing transcription: ${err?.message || err}`
@@ -278,4 +324,31 @@ export async function startWebexRecording(
   );
 
   log("Webex recording started successfully");
+}
+
+/**
+ * Post the live transcript viewer URL into the Webex meeting chat
+ * via the SDK's built-in chat/messaging capability.
+ */
+async function postViewerUrlToMeeting(page: Page, viewerUrl: string): Promise<void> {
+  await page.evaluate(async (url: string) => {
+    const meeting = (window as any).__WEBEX_MEETING;
+    if (!meeting) {
+      (window as any).logBot('[TranscriptRoom] No active meeting to post viewer URL');
+      return;
+    }
+
+    // Try using the Webex SDK meeting chat API
+    // meeting.sendMessage or meeting.chat.send depending on SDK version
+    try {
+      if (meeting.chat && typeof meeting.chat.send === 'function') {
+        await meeting.chat.send(`📝 Live transcript available: ${url}`);
+        (window as any).logBot('[TranscriptRoom] Viewer URL posted to meeting chat');
+      } else {
+        (window as any).logBot('[TranscriptRoom] Meeting chat API not available in this SDK version');
+      }
+    } catch (err: any) {
+      (window as any).logBot(`[TranscriptRoom] Failed to post to meeting chat: ${err?.message || err}`);
+    }
+  }, viewerUrl);
 }

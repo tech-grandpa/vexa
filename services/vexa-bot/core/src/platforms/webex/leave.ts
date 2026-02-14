@@ -3,6 +3,7 @@ import { log, callLeaveCallback } from "../../utils";
 import { BotConfig } from "../../types";
 import { LeaveReason } from "../shared/meetingFlow";
 import { stopLocalServer } from "./join";
+import { getActiveTranscriptRoom } from "./recording";
 
 export async function prepareForWebexRecording(
   page: Page,
@@ -58,6 +59,22 @@ export async function leaveWebex(
     log(`Error leaving Webex meeting: ${err.message}`);
     return false;
   } finally {
+    // End the transcript room (starts expiry countdown)
+    const transcriptRoom = getActiveTranscriptRoom();
+    if (transcriptRoom) {
+      try {
+        const transcript = await transcriptRoom.getTranscriptText();
+        if (transcript) {
+          log(`[TranscriptRoom] Full transcript (${transcript.split('\n').length} lines) available until room expires`);
+          // TODO: Deliver full transcript to host (email, Webex message, etc.)
+        }
+        await transcriptRoom.endRoom();
+        transcriptRoom.cleanup();
+      } catch (err: any) {
+        log(`[TranscriptRoom] Error during room cleanup: ${err.message}`);
+      }
+    }
+
     // Clean up the local HTTP server used to serve meeting.html
     stopLocalServer();
   }
