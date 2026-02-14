@@ -220,7 +220,7 @@ const server = http.createServer((req, res) => {
 });
 
 // ── WebSocket for ingest ─────────────────────────────────────────────
-const wss = new WebSocketServer({ server, path: undefined });
+const wss = new WebSocketServer({ noServer: true });
 
 server.on('upgrade', (req, socket, head) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
