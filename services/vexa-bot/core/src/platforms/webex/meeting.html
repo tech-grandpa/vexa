@@ -73,6 +73,20 @@
         window.__WEBEX_STATUS.initialized = true;
         log('SDK initialized');
         
+        // Wait for meetings plugin to be fully ready before registering.
+        // The meetings plugin bootstraps asynchronously; calling register()
+        // before it's ready causes "Cannot read properties of undefined
+        // (reading 'internal')" errors.
+        log('Waiting for meetings:ready event...');
+        await new Promise((resolve, reject) => {
+          const timeout = setTimeout(() => reject(new Error('meetings:ready timed out after 30s')), 30000);
+          webex.meetings.on('meetings:ready', () => {
+            clearTimeout(timeout);
+            log('meetings:ready received');
+            resolve();
+          });
+        });
+        
         // Register with Webex
         log('Registering with Webex...');
         await webex.meetings.register();

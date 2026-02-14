@@ -2,6 +2,51 @@ import { Page } from "playwright";
 import { log, randomDelay, callJoiningCallback } from "../../utils";
 import { BotConfig } from "../../types";
 import * as path from "path";
+import * as http from "http";
+import * as fs from "fs";
+
+// Track active server so we can clean up
+let activeServer: http.Server | null = null;
+
+/**
+ * Start a minimal HTTP server to serve meeting.html.
+ * The Webex JS SDK makes XHR requests that require a non-null origin
+ * (file:// gives origin "null" which fails CORS preflight).
+ */
+function startLocalServer(htmlPath: string): Promise<{ server: http.Server; port: number }> {
+  return new Promise((resolve, reject) => {
+    const htmlContent = fs.readFileSync(htmlPath, "utf-8");
+
+    const server = http.createServer((req, res) => {
+      res.writeHead(200, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "no-cache",
+      });
+      res.end(htmlContent);
+    });
+
+    server.listen(0, "127.0.0.1", () => {
+      const addr = server.address();
+      if (addr && typeof addr === "object") {
+        log(`Local HTTP server started on port ${addr.port}`);
+        resolve({ server, port: addr.port });
+      } else {
+        reject(new Error("Failed to get server address"));
+      }
+    });
+
+    server.on("error", reject);
+  });
+}
+
+/** Stop the local server if running */
+export function stopLocalServer(): void {
+  if (activeServer) {
+    activeServer.close();
+    activeServer = null;
+    log("Local HTTP server stopped");
+  }
+}
 
 export async function joinWebexMeeting(
   page: Page,
@@ -14,11 +59,13 @@ export async function joinWebexMeeting(
     throw new Error("Webex platform requires access_token in botConfig.data");
   }
 
-  // Load meeting.html from local file system
+  // Serve meeting.html over HTTP to avoid CORS issues with file:// origin
   const htmlPath = path.join(__dirname, "meeting.html");
-  const htmlUrl = `file://${htmlPath}`;
+  const { server, port } = await startLocalServer(htmlPath);
+  activeServer = server;
+  const htmlUrl = `http://127.0.0.1:${port}/meeting.html`;
 
-  log(`Loading Webex SDK host page: ${htmlPath}`);
+  log(`Loading Webex SDK host page via HTTP: ${htmlUrl}`);
   await page.goto(htmlUrl, { waitUntil: "networkidle" });
   await page.bringToFront();
 

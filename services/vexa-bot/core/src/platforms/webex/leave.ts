@@ -2,6 +2,7 @@ import { Page } from "playwright";
 import { log, callLeaveCallback } from "../../utils";
 import { BotConfig } from "../../types";
 import { LeaveReason } from "../shared/meetingFlow";
+import { stopLocalServer } from "./join";
 
 export async function prepareForWebexRecording(
   page: Page,
@@ -56,5 +57,8 @@ export async function leaveWebex(
   } catch (err: any) {
     log(`Error leaving Webex meeting: ${err.message}`);
     return false;
+  } finally {
+    // Clean up the local HTTP server used to serve meeting.html
+    stopLocalServer();
   }
 }
