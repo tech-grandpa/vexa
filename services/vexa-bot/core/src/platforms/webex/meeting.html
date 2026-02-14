@@ -108,6 +108,17 @@
           if (media.type === 'remoteAudio') {
             window.__WEBEX_AUDIO_STREAM = media.stream;
             window.__WEBEX_STATUS.audioReady = true;
+            
+            // CRITICAL: Attach stream to an <audio> element so Chrome
+            // actually decodes WebRTC RTP packets. Without this,
+            // MediaStreamSource/AudioContext sees all zeros.
+            const audioEl = document.createElement('audio');
+            audioEl.srcObject = media.stream;
+            audioEl.autoplay = true;
+            audioEl.volume = 1.0;
+            document.body.appendChild(audioEl);
+            audioEl.play().catch(e => log('Audio element play error', { error: e.message }));
+            
             log('Remote audio stream available', {
               tracks: media.stream.getTracks().length,
               trackInfo: media.stream.getTracks().map(t => ({
@@ -187,7 +198,7 @@
           mediaOptions: {
             receiveAudio: true,
             receiveVideo: false,
-            sendAudio: false,
+            sendAudio: true,
             sendVideo: false
           }
         });

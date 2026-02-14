@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>Test5</title></head>
+<body>
+<script crossorigin src="https://unpkg.com/webex@3.7.0/umd/webex.min.js"></script>
+<script>
+window.runTest = async function(token, meetingUrl) {
+  const webex = window.Webex.init({
+    credentials: { access_token: token },
+    config: { logger: { level: 'info' } }
+  });
+  
+  // Wait for meetings plugin to be ready
+  console.log('[TEST] Waiting for meetings:ready...');
+  await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('meetings:ready timeout 30s')), 30000);
+    webex.meetings.on('meetings:ready', () => {
+      clearTimeout(timeout);
+      console.log('[TEST] meetings:ready fired!');
+      resolve();
+    });
+  });
+  
+  console.log('[TEST] Now registering...');
+  try {
+    await webex.meetings.register();
+    console.log('[TEST] Registered!');
+  } catch(e) {
+    console.log('[TEST] Register error:', e.message);
+    return { error: e.message };
+  }
+  
+  console.log('[TEST] Creating meeting for:', meetingUrl);
+  const meeting = await webex.meetings.create(meetingUrl);
+  console.log('[TEST] Meeting created:', meeting.id);
+  
+  meeting.on('media:ready', (m) => console.log('[TEST] media:ready:', m.type));
+  meeting.on('error', (e) => console.log('[TEST] meeting error:', e.message));
+  meeting.on('meeting:stateChange', (s) => console.log('[TEST] state:', JSON.stringify(s)));
+  
+  console.log('[TEST] Joining...');
+  await meeting.join({
+    mediaOptions: { receiveAudio: true, receiveVideo: false, sendAudio: false, sendVideo: false }
+  });
+  console.log('[TEST] JOINED SUCCESSFULLY!');
+  
+  // Wait 10s to observe
+  await new Promise(r => setTimeout(r, 10000));
+  
+  await meeting.leave();
+  console.log('[TEST] Left meeting');
+  return { success: true };
+};
+</script>
+</body></html>
