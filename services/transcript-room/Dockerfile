@@ -1,7 +1,7 @@
 FROM node:22-alpine
 WORKDIR /app
-COPY package.json package-lock.json* ./
+COPY services/transcript-room/package.json services/transcript-room/package-lock.json* ./
 RUN npm ci --omit=dev
-COPY server.js .
+COPY services/transcript-room/server.js services/transcript-room/viewer.html ./
 EXPOSE 8790
 CMD ["node", "server.js"]

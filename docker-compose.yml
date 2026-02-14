@@ -263,6 +263,24 @@ services:
       - vexa_default
     restart: unless-stopped
 
+    transcript-room:
+    build:
+      context: .
+      dockerfile: services/transcript-room/Dockerfile
+    ports:
+      - "${TRANSCRIPT_ROOM_PORT:-8790}:8790"
+    environment:
+      - PORT=8790
+      - BASE_URL=${TRANSCRIPT_ROOM_BASE_URL:-http://localhost:8790}
+    networks:
+      - vexa_default
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8790/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
   redis:
     image: redis:7.0-alpine
     command:

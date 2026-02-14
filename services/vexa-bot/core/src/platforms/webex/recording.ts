@@ -30,12 +30,16 @@ export async function startWebexRecording(
     const room = await transcriptRoom.createRoom(botConfig.meeting_id || botConfig.meetingUrl);
     log(`[TranscriptRoom] Live viewer: ${room.viewerUrl}`);
 
-    // Post the viewer URL to Webex meeting chat if possible
-    if (botConfig.data?.access_token && botConfig.meetingUrl) {
+    // Notify about the viewer URL
+    // The URL can be delivered via:
+    //  - Webex meeting chat (if bot has messaging scope)
+    //  - Webhook callback to bot-manager
+    //  - Simply logged for the host to share
+    if (botConfig.data?.access_token) {
       try {
-        await postViewerUrlToMeeting(page, room.viewerUrl);
+        await postViewerUrlToMeeting(page, room.viewerUrl, botConfig);
       } catch (err: any) {
-        log(`[TranscriptRoom] Could not post viewer URL to meeting chat: ${err.message}`);
+        log(`[TranscriptRoom] Could not post viewer URL: ${err.message}`);
       }
     }
   } catch (err: any) {
@@ -327,28 +331,81 @@ export async function startWebexRecording(
 }
 
 /**
- * Post the live transcript viewer URL into the Webex meeting chat
- * via the SDK's built-in chat/messaging capability.
+ * Notify about the live transcript viewer URL.
+ *
+ * Delivery strategies (tried in order):
+ * 1. Webhook callback to bot-manager (if configured) — most reliable
+ * 2. Webex REST API direct message to meeting host (if hostEmail available)
+ * 3. Log only (always happens as fallback)
  */
-async function postViewerUrlToMeeting(page: Page, viewerUrl: string): Promise<void> {
-  await page.evaluate(async (url: string) => {
-    const meeting = (window as any).__WEBEX_MEETING;
-    if (!meeting) {
-      (window as any).logBot('[TranscriptRoom] No active meeting to post viewer URL');
-      return;
-    }
-
-    // Try using the Webex SDK meeting chat API
-    // meeting.sendMessage or meeting.chat.send depending on SDK version
+async function postViewerUrlToMeeting(page: Page, viewerUrl: string, botConfig: BotConfig): Promise<void> {
+  // Strategy 1: Webhook callback to bot-manager
+  const callbackUrl = process.env.TRANSCRIPT_URL_CALLBACK || botConfig.data?.transcriptUrlCallback;
+  if (callbackUrl) {
     try {
-      if (meeting.chat && typeof meeting.chat.send === 'function') {
-        await meeting.chat.send(`📝 Live transcript available: ${url}`);
-        (window as any).logBot('[TranscriptRoom] Viewer URL posted to meeting chat');
-      } else {
-        (window as any).logBot('[TranscriptRoom] Meeting chat API not available in this SDK version');
+      const http = require('http');
+      const https = require('https');
+      const parsed = new URL(callbackUrl);
+      const client = parsed.protocol === 'https:' ? https : http;
+      const body = JSON.stringify({
+        event: 'transcript_room_created',
+        viewerUrl,
+        meetingId: botConfig.meeting_id,
+        meetingUrl: botConfig.meetingUrl,
+      });
+
+      await new Promise<void>((resolve, reject) => {
+        const req = client.request({
+          hostname: parsed.hostname,
+          port: parsed.port,
+          path: parsed.pathname,
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+        }, (res: any) => { res.resume(); resolve(); });
+        req.on('error', reject);
+        req.write(body);
+        req.end();
+      });
+
+      log(`[TranscriptRoom] Viewer URL sent via callback to ${callbackUrl}`);
+      return;
+    } catch (err: any) {
+      log(`[TranscriptRoom] Callback failed: ${err.message}, trying next strategy`);
+    }
+  }
+
+  // Strategy 2: Direct message to host via Webex REST API
+  const hostEmail = botConfig.data?.hostEmail;
+  const accessToken = botConfig.data?.access_token;
+  if (hostEmail && accessToken) {
+    try {
+      const sent = await page.evaluate(async ({ token, email, url }: { token: string; email: string; url: string }) => {
+        try {
+          const resp = await fetch('https://webexapis.com/v1/messages', {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${token}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              toPersonEmail: email,
+              text: `📝 Live transcript for your meeting is ready: ${url}`,
+              markdown: `📝 **Live Transcript** for your meeting is ready: [Open Viewer](${url})\n\nShare this link with participants so they can follow along.`,
+            }),
+          });
+          return resp.ok;
+        } catch { return false; }
+      }, { token: accessToken, email: hostEmail, url: viewerUrl });
+
+      if (sent) {
+        log(`[TranscriptRoom] Viewer URL sent to host: ${hostEmail}`);
+        return;
       }
     } catch (err: any) {
-      (window as any).logBot(`[TranscriptRoom] Failed to post to meeting chat: ${err?.message || err}`);
+      log(`[TranscriptRoom] Webex message to host failed: ${err.message}`);
     }
-  }, viewerUrl);
+  }
+
+  // Strategy 3: Log only (always)
+  log(`[TranscriptRoom] Viewer URL (share manually): ${viewerUrl}`);
 }
