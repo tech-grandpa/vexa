@@ -500,8 +500,6 @@ tx.addEventListener('scroll', () => {
   sb.style.display = userScrolled ? 'block' : 'none';
 });
 
-function esc(s) { const d = document.createElement('span'); d.textContent = s; return d.innerHTML; }
-
 function addLine(seg) {
   emptyState.classList.add('hidden');
   segCount++;
@@ -517,13 +515,24 @@ function addLine(seg) {
   const div = document.createElement('div');
   div.className = 'segment' + (isContinuation ? ' continuation' : '');
 
-  const timeSpan = `<span class="seg-time">${ts}</span>`;
-  const speakerSpan = seg.speaker
-    ? `<span class="seg-speaker" data-color="${getSpeakerColor(seg.speaker)}">${esc(seg.speaker)}</span>`
-    : `<span class="seg-speaker"></span>`;
-  const textSpan = `<span class="seg-text">${esc(seg.text)}</span>`;
+  const timeEl = document.createElement('span');
+  timeEl.className = 'seg-time';
+  timeEl.textContent = ts;
 
-  div.innerHTML = timeSpan + speakerSpan + textSpan;
+  const speakerEl = document.createElement('span');
+  speakerEl.className = 'seg-speaker';
+  if (seg.speaker) {
+    speakerEl.setAttribute('data-color', getSpeakerColor(seg.speaker));
+    speakerEl.textContent = seg.speaker;
+  }
+
+  const textEl = document.createElement('span');
+  textEl.className = 'seg-text';
+  textEl.textContent = seg.text;
+
+  div.appendChild(timeEl);
+  div.appendChild(speakerEl);
+  div.appendChild(textEl);
   tx.appendChild(div);
 
   if (!userScrolled) scrollToBottom();

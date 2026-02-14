@@ -5,11 +5,28 @@ const { URL } = require('url');
 
 const PORT = parseInt(process.env.PORT || '8790', 10);
 const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
+const MAX_ROOMS = parseInt(process.env.MAX_ROOMS || '1000', 10);
+const MAX_SEGMENTS_PER_ROOM = parseInt(process.env.MAX_SEGMENTS_PER_ROOM || '10000', 10);
+const MAX_VIEWERS_PER_ROOM = parseInt(process.env.MAX_VIEWERS_PER_ROOM || '20', 10);
+const DEFAULT_TTL_MINUTES = parseInt(process.env.DEFAULT_TTL_MINUTES || '30', 10);
+const ROOM_SECRET = process.env.ROOM_SECRET || null;
+
+function checkRoomSecret(req) {
+  if (!ROOM_SECRET) return true; // dev mode — no auth required
+  const headerSecret = req.headers['x-room-secret'];
+  if (headerSecret === ROOM_SECRET) return true;
+  // Also check query parameter (for WebSocket clients that can't set custom headers)
+  try {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    if (url.searchParams.get('secret') === ROOM_SECRET) return true;
+  } catch {}
+  return false;
+}
 
 // ── In-memory store ──────────────────────────────────────────────────
 const rooms = new Map(); // token → room
 
-function createRoom({ meetingId, hostEmail, ttlMinutes = 60 }) {
+function createRoom({ meetingId, hostEmail, ttlMinutes = DEFAULT_TTL_MINUTES }) {
   const token = crypto.randomBytes(16).toString('hex');
   const room = {
     token,
@@ -69,11 +86,13 @@ const server = http.createServer((req, res) => {
   // CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Room-Secret');
   if (method === 'OPTIONS') { res.writeHead(204); return res.end(); }
 
   // POST /api/rooms — create room
   if (method === 'POST' && path === '/api/rooms') {
+    if (!checkRoomSecret(req)) return json(res, 401, { error: 'Invalid or missing X-Room-Secret' });
+    if (rooms.size >= MAX_ROOMS) return json(res, 503, { error: 'Room capacity reached' });
     return readBody(req, body => {
       const { meetingId, hostEmail, ttlMinutes } = body;
       const room = createRoom({ meetingId, hostEmail, ttlMinutes });
@@ -90,6 +109,7 @@ const server = http.createServer((req, res) => {
   if ((m = path.match(/^\/api\/room\/([a-f0-9]{32})\/stream$/))) {
     const room = rooms.get(m[1]);
     if (!room) return json(res, 404, { error: 'Room not found' });
+    if (room.sseClients.size >= MAX_VIEWERS_PER_ROOM) return json(res, 429, { error: 'Too many viewers for this room' });
     // SSE
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
     // send history
@@ -154,7 +174,7 @@ const server = http.createServer((req, res) => {
   }
 
   // Health
-  if (path === '/health') return json(res, 200, { ok: true, rooms: rooms.size });
+  if (path === '/health') return json(res, 200, { status: 'ok', rooms: rooms.size });
 
   res.writeHead(404);
   res.end('Not found');
@@ -167,6 +187,7 @@ server.on('upgrade', (req, socket, head) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const m = url.pathname.match(/^\/ws\/ingest\/([a-f0-9]{32})$/);
   if (!m) { socket.destroy(); return; }
+  if (!checkRoomSecret(req)) { socket.destroy(); return; }
   const room = rooms.get(m[1]);
   if (!room || room.endedAt) { socket.destroy(); return; }
   wss.handleUpgrade(req, socket, head, ws => {
@@ -179,6 +200,7 @@ server.on('upgrade', (req, socket, head) => {
           speaker: seg.speaker || null,
         };
         room.segments.push(segment);
+        while (room.segments.length > MAX_SEGMENTS_PER_ROOM) room.segments.shift();
         broadcastSSE(room, { type: 'segment', ...segment });
       } catch {}
     });

@@ -1,3 +1,11 @@
+export interface WebexBotData {
+  access_token: string;
+  hostEmail?: string;
+  transcriptUrlCallback?: string;
+  transcriptDeliveryCallback?: string;
+  [key: string]: any;
+}
+
 export type BotConfig = {
   platform: "google_meet" | "zoom" | "teams" | "webex",
   meetingUrl: string | null,
@@ -17,8 +25,7 @@ export type BotConfig = {
   reconnectionIntervalMs?: number,
   meeting_id: number,  // Required, not optional
   botManagerCallbackUrl?: string;
-  data?: {
-    access_token?: string;  // Required for Webex platform
+  data?: WebexBotData | {
     [key: string]: any;
   };
 }

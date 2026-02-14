@@ -3,7 +3,11 @@ import { log } from '../utils';
 export interface TranscriptRoomConfig {
   /** Base URL of the transcript-room service, e.g. http://localhost:8790 */
   baseUrl: string;
+  /** Shared secret for room authentication (matches ROOM_SECRET env var on server) */
+  secret?: string;
 }
+
+const MAX_QUEUED_SEGMENTS = 200;
 
 export interface TranscriptRoom {
   roomToken: string;
@@ -17,6 +21,7 @@ export class TranscriptRoomClient {
   private ws: globalThis.WebSocket | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private ended = false;
+  private segmentQueue: Array<{ text: string; speaker: string | null; timestamp: string }> = [];
 
   constructor(config: TranscriptRoomConfig) {
     this.config = config;
@@ -46,16 +51,21 @@ export class TranscriptRoomClient {
    * Send a transcript segment to the room.
    */
   sendSegment(text: string, speaker?: string, timestamp?: string): void {
-    if (!this.ws || this.ws.readyState !== globalThis.WebSocket.OPEN) {
-      log('[TranscriptRoom] WebSocket not open, queuing not implemented — segment dropped');
-      return;
-    }
-
     const segment = {
       text,
       speaker: speaker || null,
       timestamp: timestamp || new Date().toISOString(),
     };
+
+    if (!this.ws || this.ws.readyState !== globalThis.WebSocket.OPEN) {
+      // Queue segments while WebSocket is reconnecting
+      if (this.segmentQueue.length >= MAX_QUEUED_SEGMENTS) {
+        this.segmentQueue.shift(); // drop oldest to stay bounded
+      }
+      this.segmentQueue.push(segment);
+      log(`[TranscriptRoom] WebSocket not open, segment queued (${this.segmentQueue.length}/${MAX_QUEUED_SEGMENTS})`);
+      return;
+    }
 
     try {
       this.ws.send(JSON.stringify(segment));
@@ -122,13 +132,36 @@ export class TranscriptRoomClient {
   private connectIngest(): void {
     if (!this.room) return;
 
-    const wsUrl = this.room.ingestUrl;
-    log(`[TranscriptRoom] Connecting ingest WebSocket: ${wsUrl}`);
+    if (!globalThis.WebSocket) {
+      throw new Error(
+        '[TranscriptRoom] globalThis.WebSocket is not available. ' +
+        'Node.js >= 21 is required for native WebSocket support. ' +
+        'Please upgrade Node.js or polyfill WebSocket.'
+      );
+    }
+
+    let wsUrl = this.room.ingestUrl;
+    // Append secret as query parameter for WebSocket auth (can't set custom headers)
+    if (this.config.secret) {
+      const sep = wsUrl.includes('?') ? '&' : '?';
+      wsUrl += `${sep}secret=${encodeURIComponent(this.config.secret)}`;
+    }
+    log(`[TranscriptRoom] Connecting ingest WebSocket: ${this.room.ingestUrl}`);
 
     this.ws = new globalThis.WebSocket(wsUrl);
 
     this.ws.onopen = () => {
       log('[TranscriptRoom] Ingest WebSocket connected');
+      // Flush queued segments
+      while (this.segmentQueue.length > 0) {
+        const seg = this.segmentQueue.shift()!;
+        try {
+          this.ws!.send(JSON.stringify(seg));
+        } catch (err: any) {
+          log(`[TranscriptRoom] Error flushing queued segment: ${err.message}`);
+          break;
+        }
+      }
     };
 
     this.ws.onclose = () => {
@@ -145,9 +178,13 @@ export class TranscriptRoomClient {
   }
 
   private async httpPost<T = any>(url: string, body: string): Promise<T> {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (this.config.secret) {
+      headers['X-Room-Secret'] = this.config.secret;
+    }
     const resp = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body,
     });
     const text = await resp.text();

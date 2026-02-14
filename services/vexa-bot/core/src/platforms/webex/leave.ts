@@ -3,7 +3,7 @@ import { log, callLeaveCallback } from "../../utils";
 import { BotConfig } from "../../types";
 import { LeaveReason } from "../shared/meetingFlow";
 import { stopLocalServer } from "./join";
-import { getActiveTranscriptRoom } from "./recording";
+import { getActiveTranscriptRoom, setActiveTranscriptRoom } from "./recording";
 
 export async function prepareForWebexRecording(
   page: Page,
@@ -92,6 +92,9 @@ export async function leaveWebex(
         transcriptRoom.cleanup();
       } catch (err: any) {
         log(`[TranscriptRoom] Error during room cleanup: ${err.message}`);
+      } finally {
+        // Always remove the Map entry regardless of errors
+        setActiveTranscriptRoom(meetingKey, null);
       }
     }
 
@@ -135,6 +138,7 @@ async function deliverTranscriptToHost(
         'Authorization': `Bearer ${accessToken}`,
         'Content-Type': 'application/json',
       },
+      signal: AbortSignal.timeout(10000),
       body: JSON.stringify({
         toPersonEmail: hostEmail,
         text,

@@ -12,12 +12,30 @@ export function getActiveTranscriptRoom(meetingId: string | number): TranscriptR
   return activeTranscriptRooms.get(meetingId) || null;
 }
 
-function setActiveTranscriptRoom(meetingId: string | number, client: TranscriptRoomClient | null): void {
+export function setActiveTranscriptRoom(meetingId: string | number, client: TranscriptRoomClient | null): void {
   if (client) {
     activeTranscriptRooms.set(meetingId, client);
   } else {
     activeTranscriptRooms.delete(meetingId);
   }
+}
+
+/**
+ * Clean up all active transcript rooms (e.g. on process crash/shutdown).
+ * Iterates all entries, calls endRoom() on each, then clears the Map.
+ */
+export async function cleanupAllTranscriptRooms(): Promise<void> {
+  const entries = Array.from(activeTranscriptRooms.entries());
+  for (const [meetingId, client] of entries) {
+    try {
+      await client.endRoom();
+      client.cleanup();
+      log(`[TranscriptRoom] Cleaned up room for meeting ${meetingId}`);
+    } catch (err: any) {
+      log(`[TranscriptRoom] Error cleaning up room for meeting ${meetingId}: ${err.message}`);
+    }
+  }
+  activeTranscriptRooms.clear();
 }
 
 export async function startWebexRecording(
@@ -31,7 +49,8 @@ export async function startWebexRecording(
 
   // Initialize Transcript Room (ephemeral live viewer)
   const transcriptRoomUrl = process.env.TRANSCRIPT_ROOM_URL || 'http://localhost:8790';
-  const transcriptRoom = new TranscriptRoomClient({ baseUrl: transcriptRoomUrl });
+  const transcriptRoomSecret = process.env.ROOM_SECRET || undefined;
+  const transcriptRoom = new TranscriptRoomClient({ baseUrl: transcriptRoomUrl, secret: transcriptRoomSecret });
   const meetingKey = botConfig.meeting_id ?? botConfig.meetingUrl ?? 'unknown';
   setActiveTranscriptRoom(meetingKey, transcriptRoom);
 
@@ -360,6 +379,7 @@ async function postViewerUrlToMeeting(_page: Page, viewerUrl: string, botConfig:
       await fetch(callbackUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(10000),
         body: JSON.stringify({
           event: 'transcript_room_created',
           viewerUrl,
@@ -386,6 +406,7 @@ async function postViewerUrlToMeeting(_page: Page, viewerUrl: string, botConfig:
           'Authorization': `Bearer ${accessToken}`,
           'Content-Type': 'application/json',
         },
+        signal: AbortSignal.timeout(10000),
         body: JSON.stringify({
           toPersonEmail: hostEmail,
           text: `📝 Live transcript for your meeting is ready: ${viewerUrl}`,
