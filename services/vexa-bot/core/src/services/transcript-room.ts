@@ -1,5 +1,4 @@
 import { log } from '../utils';
-import http from 'http';
 
 export interface TranscriptRoomConfig {
   /** Base URL of the transcript-room service, e.g. http://localhost:8790 */
@@ -17,6 +16,7 @@ export class TranscriptRoomClient {
   private room: TranscriptRoom | null = null;
   private ws: globalThis.WebSocket | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private ended = false;
 
   constructor(config: TranscriptRoomConfig) {
     this.config = config;
@@ -72,6 +72,7 @@ export class TranscriptRoomClient {
 
     try {
       const url = `${this.config.baseUrl}/api/room/${this.room.roomToken}/end`;
+      this.ended = true;
       await this.httpPost(url, '{}');
       log('[TranscriptRoom] Room ended, expiry countdown started');
     } catch (err: any) {
@@ -132,8 +133,8 @@ export class TranscriptRoomClient {
 
     this.ws.onclose = () => {
       log('[TranscriptRoom] Ingest WebSocket closed');
-      // Reconnect if room still active
-      if (this.room) {
+      // Reconnect only if room still active and not ended
+      if (this.room && !this.ended) {
         this.reconnectTimer = setTimeout(() => this.connectIngest(), 3000);
       }
     };
@@ -143,41 +144,19 @@ export class TranscriptRoomClient {
     };
   }
 
-  private httpPost<T = any>(url: string, body: string): Promise<T> {
-    return new Promise((resolve, reject) => {
-      const parsed = new URL(url);
-      const req = http.request({
-        hostname: parsed.hostname,
-        port: parsed.port,
-        path: parsed.pathname + parsed.search,
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-      }, (res) => {
-        let data = '';
-        res.on('data', (chunk) => data += chunk);
-        res.on('end', () => {
-          try { resolve(JSON.parse(data)); }
-          catch { resolve(data as any); }
-        });
-      });
-      req.on('error', reject);
-      req.write(body);
-      req.end();
+  private async httpPost<T = any>(url: string, body: string): Promise<T> {
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
     });
+    const text = await resp.text();
+    try { return JSON.parse(text); }
+    catch { return text as any; }
   }
 
-  private httpGet(url: string): Promise<string> {
-    return new Promise((resolve, reject) => {
-      const parsed = new URL(url);
-      http.get({
-        hostname: parsed.hostname,
-        port: parsed.port,
-        path: parsed.pathname + parsed.search,
-      }, (res) => {
-        let data = '';
-        res.on('data', (chunk) => data += chunk);
-        res.on('end', () => resolve(data));
-      }).on('error', reject);
-    });
+  private async httpGet(url: string): Promise<string> {
+    const resp = await fetch(url);
+    return resp.text();
   }
 }

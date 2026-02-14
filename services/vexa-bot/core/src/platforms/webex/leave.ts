@@ -60,7 +60,8 @@ export async function leaveWebex(
     return false;
   } finally {
     // End the transcript room and deliver final transcript to host
-    const transcriptRoom = getActiveTranscriptRoom();
+    const meetingKey = botConfig?.meeting_id ?? botConfig?.meetingUrl ?? 'unknown';
+    const transcriptRoom = getActiveTranscriptRoom(meetingKey);
     if (transcriptRoom) {
       try {
         const transcript = await transcriptRoom.getTranscriptText();
@@ -73,7 +74,6 @@ export async function leaveWebex(
           // Deliver transcript to host via Webex message
           if (botConfig?.data?.hostEmail && botConfig?.data?.access_token) {
             await deliverTranscriptToHost(
-              page,
               botConfig.data.access_token,
               botConfig.data.hostEmail,
               transcript,
@@ -102,17 +102,16 @@ export async function leaveWebex(
 
 /**
  * Send the full transcript to the meeting host via Webex direct message.
+ * Uses Node.js native fetch (not page.evaluate — page may be closing).
  * Truncates to fit Webex message limits (~7500 chars for markdown).
  */
 async function deliverTranscriptToHost(
-  page: Page | null,
   accessToken: string,
   hostEmail: string,
   transcript: string,
   viewerUrl: string | null
 ): Promise<void> {
   try {
-    // Webex message limit is ~7500 chars. If transcript is longer, truncate and note.
     const MAX_CHARS = 6000;
     let body = transcript;
     let truncated = false;
@@ -121,39 +120,32 @@ async function deliverTranscriptToHost(
       truncated = true;
     }
 
+    const lineCount = transcript.split('\n').length;
     const header = `📝 **Meeting Transcript**\n\n`;
     const footer = truncated
-      ? `\n\n---\n_Transcript truncated (${transcript.split('\n').length} total lines).${viewerUrl ? ` Full version: ${viewerUrl}` : ''}_`
-      : `\n\n---\n_${transcript.split('\n').length} lines total._`;
+      ? `\n\n---\n_Transcript truncated (${lineCount} total lines).${viewerUrl ? ` Full version: ${viewerUrl}` : ''}_`
+      : `\n\n---\n_${lineCount} lines total._`;
 
     const markdown = header + '```\n' + body + '\n```' + footer;
     const text = `📝 Meeting Transcript\n\n${body}${truncated ? '\n\n(truncated)' : ''}`;
 
-    // Use fetch from page context (has network access)
-    if (page) {
-      const sent = await page.evaluate(async ({ token, email, md, txt }: any) => {
-        try {
-          const resp = await fetch('https://webexapis.com/v1/messages', {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${token}`,
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              toPersonEmail: email,
-              text: txt,
-              markdown: md,
-            }),
-          });
-          return resp.ok;
-        } catch { return false; }
-      }, { token: accessToken, email: hostEmail, md: markdown, txt: text });
+    const resp = await fetch('https://webexapis.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        toPersonEmail: hostEmail,
+        text,
+        markdown,
+      }),
+    });
 
-      if (sent) {
-        log(`[TranscriptRoom] Full transcript delivered to host: ${hostEmail}`);
-      } else {
-        log(`[TranscriptRoom] Failed to deliver transcript to host (API returned error)`);
-      }
+    if (resp.ok) {
+      log(`[TranscriptRoom] Full transcript delivered to host: ${hostEmail}`);
+    } else {
+      log(`[TranscriptRoom] Failed to deliver transcript to host (HTTP ${resp.status})`);
     }
   } catch (err: any) {
     log(`[TranscriptRoom] Error delivering transcript to host: ${err.message}`);
@@ -169,35 +161,21 @@ async function deliverTranscriptViaCallback(
   botConfig?: BotConfig
 ): Promise<void> {
   try {
-    const http = require('http');
-    const https = require('https');
-    const parsed = new URL(callbackUrl);
-    const client = parsed.protocol === 'https:' ? https : http;
-    const body = JSON.stringify({
-      event: 'transcript_delivered',
-      transcript,
-      lineCount: transcript.split('\n').length,
-      meetingId: botConfig?.meeting_id,
-      meetingUrl: botConfig?.meetingUrl,
-      timestamp: new Date().toISOString(),
+    const resp = await fetch(callbackUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: AbortSignal.timeout(10000),
+      body: JSON.stringify({
+        event: 'transcript_delivered',
+        transcript,
+        lineCount: transcript.split('\n').length,
+        meetingId: botConfig?.meeting_id,
+        meetingUrl: botConfig?.meetingUrl,
+        timestamp: new Date().toISOString(),
+      }),
     });
 
-    await new Promise<void>((resolve, reject) => {
-      const req = client.request({
-        hostname: parsed.hostname,
-        port: parsed.port,
-        path: parsed.pathname,
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-        timeout: 10000,
-      }, (res: any) => { res.resume(); resolve(); });
-      req.on('error', reject);
-      req.on('timeout', () => { req.destroy(); reject(new Error('Callback timeout')); });
-      req.write(body);
-      req.end();
-    });
-
-    log(`[TranscriptRoom] Transcript delivered via callback to ${callbackUrl}`);
+    log(`[TranscriptRoom] Transcript delivered via callback to ${callbackUrl} (HTTP ${resp.status})`);
   } catch (err: any) {
     log(`[TranscriptRoom] Callback delivery failed: ${err.message}`);
   }

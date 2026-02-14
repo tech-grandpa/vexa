@@ -5,11 +5,19 @@ import { WhisperLiveService } from "../../services/whisperlive";
 import { TranscriptRoomClient } from "../../services/transcript-room";
 import { ensureBrowserUtils } from "../../utils/injection";
 
-// Module-level transcript room client so leave.ts can access it
-let activeTranscriptRoom: TranscriptRoomClient | null = null;
+// Per-meeting transcript room clients, keyed by meeting_id
+const activeTranscriptRooms = new Map<string | number, TranscriptRoomClient>();
 
-export function getActiveTranscriptRoom(): TranscriptRoomClient | null {
-  return activeTranscriptRoom;
+export function getActiveTranscriptRoom(meetingId: string | number): TranscriptRoomClient | null {
+  return activeTranscriptRooms.get(meetingId) || null;
+}
+
+function setActiveTranscriptRoom(meetingId: string | number, client: TranscriptRoomClient | null): void {
+  if (client) {
+    activeTranscriptRooms.set(meetingId, client);
+  } else {
+    activeTranscriptRooms.delete(meetingId);
+  }
 }
 
 export async function startWebexRecording(
@@ -24,10 +32,12 @@ export async function startWebexRecording(
   // Initialize Transcript Room (ephemeral live viewer)
   const transcriptRoomUrl = process.env.TRANSCRIPT_ROOM_URL || 'http://localhost:8790';
   const transcriptRoom = new TranscriptRoomClient({ baseUrl: transcriptRoomUrl });
-  activeTranscriptRoom = transcriptRoom;
+  const meetingKey = botConfig.meeting_id ?? botConfig.meetingUrl ?? 'unknown';
+  setActiveTranscriptRoom(meetingKey, transcriptRoom);
 
   try {
-    const room = await transcriptRoom.createRoom(botConfig.meeting_id || botConfig.meetingUrl);
+    const meetingIdStr = botConfig.meeting_id != null ? String(botConfig.meeting_id) : (botConfig.meetingUrl || undefined);
+    const room = await transcriptRoom.createRoom(meetingIdStr);
     log(`[TranscriptRoom] Live viewer: ${room.viewerUrl}`);
 
     // Notify about the viewer URL
@@ -44,7 +54,7 @@ export async function startWebexRecording(
     }
   } catch (err: any) {
     log(`[TranscriptRoom] Failed to create room (continuing without live viewer): ${err.message}`);
-    activeTranscriptRoom = null;
+    setActiveTranscriptRoom(meetingKey, null);
   }
 
   // Initialize WhisperLive connection with STUBBORN reconnection
@@ -56,8 +66,9 @@ export async function startWebexRecording(
 
   // Expose transcript segment bridge: browser → Node.js → transcript room
   await page.exposeFunction("__onTranscriptSegment", (text: string, speaker: string | null, timestamp: string) => {
-    if (activeTranscriptRoom) {
-      activeTranscriptRoom.sendSegment(text, speaker || undefined, timestamp);
+    const room = activeTranscriptRooms.get(meetingKey);
+    if (room) {
+      room.sendSegment(text, speaker || undefined, timestamp);
     }
   });
 
@@ -235,8 +246,11 @@ export async function startWebexRecording(
                 (window as any).__vexaBotConfig
               );
 
-              // Forward finalized transcript segments to the live viewer room
-              if (data && data.text && data.text.trim()) {
+              // Forward only finalized transcript segments to the live viewer room.
+              // WhisperLive sends intermediate updates; we only forward when
+              // is_final is true (or absent, for compatibility with simple backends).
+              const isFinal = data.is_final !== false;
+              if (isFinal && data && data.text && data.text.trim()) {
                 (window as any).__onTranscriptSegment(
                   data.text.trim(),
                   data.speaker || data.participant_name || null,
@@ -338,33 +352,20 @@ export async function startWebexRecording(
  * 2. Webex REST API direct message to meeting host (if hostEmail available)
  * 3. Log only (always happens as fallback)
  */
-async function postViewerUrlToMeeting(page: Page, viewerUrl: string, botConfig: BotConfig): Promise<void> {
+async function postViewerUrlToMeeting(_page: Page, viewerUrl: string, botConfig: BotConfig): Promise<void> {
   // Strategy 1: Webhook callback to bot-manager
   const callbackUrl = process.env.TRANSCRIPT_URL_CALLBACK || botConfig.data?.transcriptUrlCallback;
   if (callbackUrl) {
     try {
-      const http = require('http');
-      const https = require('https');
-      const parsed = new URL(callbackUrl);
-      const client = parsed.protocol === 'https:' ? https : http;
-      const body = JSON.stringify({
-        event: 'transcript_room_created',
-        viewerUrl,
-        meetingId: botConfig.meeting_id,
-        meetingUrl: botConfig.meetingUrl,
-      });
-
-      await new Promise<void>((resolve, reject) => {
-        const req = client.request({
-          hostname: parsed.hostname,
-          port: parsed.port,
-          path: parsed.pathname,
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-        }, (res: any) => { res.resume(); resolve(); });
-        req.on('error', reject);
-        req.write(body);
-        req.end();
+      await fetch(callbackUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          event: 'transcript_room_created',
+          viewerUrl,
+          meetingId: botConfig.meeting_id,
+          meetingUrl: botConfig.meetingUrl,
+        }),
       });
 
       log(`[TranscriptRoom] Viewer URL sent via callback to ${callbackUrl}`);
@@ -374,30 +375,25 @@ async function postViewerUrlToMeeting(page: Page, viewerUrl: string, botConfig: 
     }
   }
 
-  // Strategy 2: Direct message to host via Webex REST API
+  // Strategy 2: Direct message to host via Webex REST API (Node.js native fetch)
   const hostEmail = botConfig.data?.hostEmail;
   const accessToken = botConfig.data?.access_token;
   if (hostEmail && accessToken) {
     try {
-      const sent = await page.evaluate(async ({ token, email, url }: { token: string; email: string; url: string }) => {
-        try {
-          const resp = await fetch('https://webexapis.com/v1/messages', {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${token}`,
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              toPersonEmail: email,
-              text: `📝 Live transcript for your meeting is ready: ${url}`,
-              markdown: `📝 **Live Transcript** for your meeting is ready: [Open Viewer](${url})\n\nShare this link with participants so they can follow along.`,
-            }),
-          });
-          return resp.ok;
-        } catch { return false; }
-      }, { token: accessToken, email: hostEmail, url: viewerUrl });
+      const resp = await fetch('https://webexapis.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          toPersonEmail: hostEmail,
+          text: `📝 Live transcript for your meeting is ready: ${viewerUrl}`,
+          markdown: `📝 **Live Transcript** for your meeting is ready: [Open Viewer](${viewerUrl})\n\nShare this link with participants so they can follow along.`,
+        }),
+      });
 
-      if (sent) {
+      if (resp.ok) {
         log(`[TranscriptRoom] Viewer URL sent to host: ${hostEmail}`);
         return;
       }
