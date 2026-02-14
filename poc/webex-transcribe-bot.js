@@ -120,7 +120,7 @@ const WHISPER_WS_URL = "ws://10.10.10.199:8000/ws/transcribe?language=auto";
     try {
       await page.evaluate(async () => {
         await window.__WEBEX_MEETING.addMedia({
-          mediaOptions: { receiveAudio: true, receiveVideo: false, sendAudio: true, sendVideo: false }
+          mediaOptions: { receiveAudio: true, receiveVideo: false, sendAudio: false, sendVideo: false }
         });
         console.log('[WEBEX] addMedia succeeded!');
       });
@@ -173,9 +173,10 @@ const WHISPER_WS_URL = "ws://10.10.10.199:8000/ws/transcribe?language=auto";
     const audioEl = document.createElement('audio');
     audioEl.srcObject = stream;
     audioEl.autoplay = true;
-    audioEl.volume = 1.0;
+    // volume=0 prevents audible output; avoid .muted which can skip RTP decode
+    audioEl.volume = 0;
     document.body.appendChild(audioEl);
-    audioEl.play().then(() => console.log('[WEBEX] Audio element playing'))
+    audioEl.play().then(() => console.log('[WEBEX] Audio element playing (muted)'))
                    .catch(e => console.log('[WEBEX] Audio play error: ' + e.message));
 
     const audioContext = new AudioContext({ sampleRate: 16000 });

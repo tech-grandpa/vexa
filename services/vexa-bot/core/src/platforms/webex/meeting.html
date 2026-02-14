@@ -115,7 +115,9 @@
             const audioEl = document.createElement('audio');
             audioEl.srcObject = media.stream;
             audioEl.autoplay = true;
-            audioEl.volume = 1.0;
+            // volume=0 prevents audible output without using .muted
+            // (.muted can cause Chrome to skip RTP decode entirely)
+            audioEl.volume = 0;
             document.body.appendChild(audioEl);
             audioEl.play().catch(e => log('Audio element play error', { error: e.message }));
             
@@ -198,7 +200,7 @@
           mediaOptions: {
             receiveAudio: true,
             receiveVideo: false,
-            sendAudio: true,
+            sendAudio: false,
             sendVideo: false
           }
         });
