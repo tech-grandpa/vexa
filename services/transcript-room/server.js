@@ -208,8 +208,17 @@ const server = http.createServer((req, res) => {
   if ((m = path.match(/^\/([a-f0-9]{32})$/))) {
     const room = rooms.get(m[1]);
     if (!room) { res.writeHead(404); return res.end('Room not found'); }
+    // Serve external viewer.html with token injected
+    const viewerPath = require('path').join(__dirname, 'viewer.html');
+    let html;
+    try {
+      html = require('fs').readFileSync(viewerPath, 'utf-8').replace('__TOKEN__', m[1]);
+    } catch {
+      // Fallback to inline viewer if file missing
+      html = viewerHTML(m[1]);
+    }
     res.writeHead(200, { 'Content-Type': 'text/html' });
-    return res.end(viewerHTML(m[1]));
+    return res.end(html);
   }
 
   // Health
