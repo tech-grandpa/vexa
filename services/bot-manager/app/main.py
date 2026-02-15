@@ -18,7 +18,7 @@ import uuid as uuid_lib
 # from app.database.service import TranscriptionService # Not used here
 # from app.tasks.monitoring import celery_app # Not used here
 
-from .config import BOT_IMAGE_NAME, REDIS_URL
+from .config import BOT_IMAGE_NAME, REDIS_URL, ALLOWED_ORG_IDS
 from app.orchestrators import (
     get_socket_session, close_docker_client, start_bot_container,
     stop_bot_container, _record_session_start, get_running_bots_status,
@@ -445,6 +445,21 @@ async def request_bot(
     user_token, current_user = auth_data
 
     logger.info(f"Received bot request for platform '{req.platform.value}' with native ID '{req.native_meeting_id}' from user {current_user.id}")
+
+    # --- Org restriction check ---
+    if ALLOWED_ORG_IDS:
+        user_org = (current_user.data or {}).get("org_id", "") if current_user.data else ""
+        if not user_org or user_org not in ALLOWED_ORG_IDS:
+            logger.warning(
+                f"Org restriction: user {current_user.id} org_id='{user_org}' "
+                f"not in ALLOWED_ORG_IDS={ALLOWED_ORG_IDS}. Rejecting bot request."
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Your organization is not authorized to use this service."
+            )
+        logger.info(f"Org restriction: user {current_user.id} org_id='{user_org}' is allowed.")
+
     native_meeting_id = req.native_meeting_id
 
     constructed_url = Platform.construct_meeting_url(req.platform.value, native_meeting_id, req.passcode)
