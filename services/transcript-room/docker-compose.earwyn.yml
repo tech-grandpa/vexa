@@ -3,7 +3,7 @@ services:
   transcript-room:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: services/transcript-room/Dockerfile
     ports:
       - "${TRANSCRIPT_ROOM_PORT:-8790}:8790"
     environment:

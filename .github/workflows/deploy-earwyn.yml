@@ -27,12 +27,15 @@ jobs:
         run: |
           set -e
           DEPLOY=${{ env.DEPLOY_DIR }}
-          mkdir -p "$DEPLOY"
+          mkdir -p "$DEPLOY/services/transcript-room"
 
-          # Copy transcript-room service files
-          cp -r services/transcript-room/* "$DEPLOY/"
+          # Copy transcript-room service files preserving expected path structure
+          cp services/transcript-room/server.js services/transcript-room/viewer.html \
+             services/transcript-room/package.json services/transcript-room/package-lock.json \
+             services/transcript-room/Dockerfile \
+             "$DEPLOY/services/transcript-room/"
           
-          # Use earwyn-specific compose
+          # Use earwyn-specific compose at root
           cp services/transcript-room/docker-compose.earwyn.yml "$DEPLOY/docker-compose.yml"
 
           cd "$DEPLOY"
