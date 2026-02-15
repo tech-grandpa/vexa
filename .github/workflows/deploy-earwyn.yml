@@ -1,0 +1,52 @@
+name: Deploy to Earwyn
+
+on:
+  push:
+    branches: [feature/webex-platform, main]
+    paths:
+      - 'services/transcript-room/**'
+      - 'services/vexa-bot/**'
+      - 'docker-compose.yml'
+      - '.github/workflows/deploy-earwyn.yml'
+  workflow_dispatch:
+
+env:
+  DEPLOY_DIR: /opt/earwyn
+
+jobs:
+  deploy:
+    name: Deploy to Earwyn VM
+    runs-on: [self-hosted, earwyn]
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy locally on runner
+        run: |
+          set -e
+          mkdir -p "${{ env.DEPLOY_DIR }}"
+
+          rsync -av --delete \
+            --include='services/transcript-room/***' \
+            --include='services/vexa-bot/***' \
+            --include='docker-compose.yml' \
+            --include='.env' \
+            --exclude='*' \
+            ./ "${{ env.DEPLOY_DIR }}/"
+
+          cd "${{ env.DEPLOY_DIR }}"
+
+          echo "=== Building services ==="
+          docker compose build transcript-room
+
+          echo "=== Starting services ==="
+          docker compose up -d transcript-room
+
+          echo "=== Health check ==="
+          sleep 5
+          curl -sf http://localhost:8790/health && echo " ✅ transcript-room healthy" || echo " ❌ transcript-room unhealthy"
+
+          echo "=== Done ==="
+          docker compose ps
