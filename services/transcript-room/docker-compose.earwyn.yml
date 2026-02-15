@@ -1,0 +1,23 @@
+name: earwyn
+services:
+  transcript-room:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "${TRANSCRIPT_ROOM_PORT:-8790}:8790"
+    environment:
+      - PORT=8790
+      - BASE_URL=${TRANSCRIPT_ROOM_BASE_URL:-https://earwyn.acgt.dev}
+      - CORS_ORIGIN=${CORS_ORIGIN:-https://earwyn.acgt.dev}
+      - ROOM_SECRET=${ROOM_SECRET}
+      - DEFAULT_TTL_MINUTES=${DEFAULT_TTL_MINUTES:-30}
+      - MAX_ROOMS=${MAX_ROOMS:-1000}
+      - MAX_SEGMENTS_PER_ROOM=${MAX_SEGMENTS_PER_ROOM:-10000}
+      - MAX_VIEWERS_PER_ROOM=${MAX_VIEWERS_PER_ROOM:-20}
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8790/health').then(r=>{if(!r.ok)process.exit(1)})"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped

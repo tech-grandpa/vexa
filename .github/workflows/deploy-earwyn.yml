@@ -23,30 +23,29 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Deploy locally on runner
+      - name: Deploy transcript-room
         run: |
           set -e
-          mkdir -p "${{ env.DEPLOY_DIR }}"
+          DEPLOY=${{ env.DEPLOY_DIR }}
+          mkdir -p "$DEPLOY"
 
-          rsync -av --delete \
-            --include='services/transcript-room/***' \
-            --include='services/vexa-bot/***' \
-            --include='docker-compose.yml' \
-            --include='.env' \
-            --exclude='*' \
-            ./ "${{ env.DEPLOY_DIR }}/"
+          # Copy transcript-room service files
+          cp -r services/transcript-room/* "$DEPLOY/"
+          
+          # Use earwyn-specific compose
+          cp services/transcript-room/docker-compose.earwyn.yml "$DEPLOY/docker-compose.yml"
 
-          cd "${{ env.DEPLOY_DIR }}"
+          cd "$DEPLOY"
 
-          echo "=== Building services ==="
-          docker compose build transcript-room
+          echo "=== Building ==="
+          docker compose build
 
-          echo "=== Starting services ==="
-          docker compose up -d transcript-room
+          echo "=== Starting ==="
+          docker compose up -d
 
           echo "=== Health check ==="
           sleep 5
           curl -sf http://localhost:8790/health && echo " ✅ transcript-room healthy" || echo " ❌ transcript-room unhealthy"
 
-          echo "=== Done ==="
+          echo "=== Status ==="
           docker compose ps
