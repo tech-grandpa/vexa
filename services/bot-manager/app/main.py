@@ -18,7 +18,8 @@ import uuid as uuid_lib
 # from app.database.service import TranscriptionService # Not used here
 # from app.tasks.monitoring import celery_app # Not used here
 
-from .config import BOT_IMAGE_NAME, REDIS_URL
+from .config import BOT_IMAGE_NAME, REDIS_URL, resolve_bot_org_id, WEBEX_BOT_ORG_ID
+from app.webex_org import validate_org
 from app.orchestrators import (
     get_socket_session, close_docker_client, start_bot_container,
     stop_bot_container, _record_session_start, get_running_bots_status,
@@ -322,6 +323,9 @@ async def startup_event():
         redis_client = None # Ensure client is None if connection fails
     # --------------------------------------
 
+    # Resolve Webex bot org ID for org restriction
+    resolve_bot_org_id()
+
     logger.info("Database, Docker Client (attempted), and Redis Client (attempted) initialized.")
     
     # Start reconciliation scheduler
@@ -445,6 +449,17 @@ async def request_bot(
     user_token, current_user = auth_data
 
     logger.info(f"Received bot request for platform '{req.platform.value}' with native ID '{req.native_meeting_id}' from user {current_user.id}")
+
+    # --- Webex org restriction: verify the access token belongs to the bot's org ---
+    if req.platform.value == "webex" and WEBEX_BOT_ORG_ID:
+        allowed, reason = await validate_org(req.access_token or "")
+        if not allowed:
+            logger.warning(f"Org restriction denied bot request from user {current_user.id}: {reason}")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=reason
+            )
+
     native_meeting_id = req.native_meeting_id
 
     constructed_url = Platform.construct_meeting_url(req.platform.value, native_meeting_id, req.passcode)
