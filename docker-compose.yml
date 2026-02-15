@@ -67,7 +67,6 @@ services:
       - DB_SSL_MODE=${DB_SSL_MODE:-disable}
       - DOCKER_HOST=unix://var/run/docker.sock
       - DEVICE_TYPE=${DEVICE_TYPE}
-      - ALLOWED_ORG_IDS=${ALLOWED_ORG_IDS:-}
       - WHISPER_LIVE_URL=ws://whisperlive-remote:9090/ws  # Direct connection to whisperlive-remote
       - ADMIN_TOKEN=${ADMIN_API_TOKEN}
     volumes:
