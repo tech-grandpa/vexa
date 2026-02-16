@@ -108,7 +108,7 @@ Client/Webhook ──POST /bots──► API Gateway ──► Bot Manager
 
 ## Employee Experience
 
-1. **Invite the bot** — Add `scribe-bot@webex.bot` as a meeting participant (in the Webex calendar invite or during the meeting)
+1. **Invite the bot** — Add `earwyn@webex.bot` as a meeting participant (in the Webex calendar invite or during the meeting)
 2. **Bot joins automatically** — Webex sends a webhook, Vexa launches the bot, it appears in the meeting
 3. **Meeting is transcribed** — The bot silently captures and transcribes audio
 4. **Access transcripts** — Via the API (`GET /transcripts/webex/{meeting_id}`) or through integrated tools
@@ -189,7 +189,7 @@ To support multiple organizations:
 {
   "platform": "webex",
   "native_meeting_id": "https://meet.webex.com/meet/example",
-  "bot_name": "Vexa Scribe",
+  "bot_name": "Earwyn",
   "access_token": "<webex-access-token>"
 }
 ```

@@ -17,7 +17,7 @@ services:
       - TRANSCRIPT_SHARE_TTL_SECONDS=900
       - LOG_LEVEL=DEBUG
       - WEBEX_BOT_TOKEN=${WEBEX_BOT_TOKEN:-}
-      - WEBEX_BOT_EMAIL=${WEBEX_BOT_EMAIL:-scribe-bot@webex.bot}
+      - WEBEX_BOT_EMAIL=${WEBEX_BOT_EMAIL:-earwyn@webex.bot}
       - WEBEX_WEBHOOK_SECRET=${WEBEX_WEBHOOK_SECRET:-}
     volumes:
       - ../.cursor:/app/.cursor

@@ -18,7 +18,7 @@ logger = logging.getLogger("vexa.webhook.webex")
 router = APIRouter(prefix="/webhooks", tags=["Webhooks"])
 
 WEBEX_API_BASE = "https://webexapis.com/v1"
-BOT_EMAIL = os.getenv("WEBEX_BOT_EMAIL", "scribe-bot@webex.bot")
+BOT_EMAIL = os.getenv("WEBEX_BOT_EMAIL", "earwyn@webex.bot")
 
 # Regex patterns for Webex meeting links
 MEETING_LINK_PATTERNS = [
@@ -89,7 +89,7 @@ async def _launch_bot(meeting_url: str, bot_token: str) -> dict:
     payload = {
         "platform": "webex",
         "native_meeting_id": meeting_url,
-        "bot_name": "Vexa Scribe",
+        "bot_name": "Earwyn",
         "access_token": bot_token,
     }
     async with httpx.AsyncClient() as client:
@@ -109,7 +109,7 @@ async def _launch_bot(meeting_url: str, bot_token: str) -> dict:
 async def _send_welcome_message(room_id: str, token: str):
     """Send a welcome message to a Webex space."""
     message = (
-        "👋 Hi! I'm **Vexa Scribe Bot** — I join meetings and transcribe them automatically.\n\n"
+        "👋 Hi! I'm **Earwyn Bot** — I join meetings and transcribe them automatically.\n\n"
         "**How to use me:**\n"
         "1. **Invite me to a meeting** — just add me as a participant and I'll join automatically\n"
         "2. **Send me a meeting link** — paste a Webex meeting URL here and I'll join\n\n"
