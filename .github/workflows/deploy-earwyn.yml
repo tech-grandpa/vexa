@@ -36,6 +36,7 @@ jobs:
             --exclude '__pycache__' \
             --exclude '.venv' \
             --exclude 'hub' \
+            --exclude '.env' \
             ./ "$DEPLOY/"
 
           # Use earwyn-specific compose
