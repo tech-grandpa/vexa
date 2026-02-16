@@ -24,6 +24,8 @@ from shared_models.schemas import (
     BotStatusResponse # ADDED: Import response model for documentation
 )
 
+from webex_webhook import router as webex_webhook_router
+
 load_dotenv()
 
 # Configuration - Service endpoints are now mandatory environment variables
@@ -138,6 +140,9 @@ def custom_openapi():
     return app.openapi_schema
 
 app.openapi = custom_openapi
+
+# Include Webex webhook routes (public, no API key)
+app.include_router(webex_webhook_router)
 
 # Add CORS middleware
 app.add_middleware(
