@@ -1,0 +1,191 @@
+# Earwyn production compose — minimum viable Vexa stack
+# Deploy dir: /opt/earwyn
+name: vexa
+
+services:
+  redis:
+    image: redis:7.0-alpine
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes:
+      - redis-data:/data
+    networks:
+      - vexa_default
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_DB=${DB_NAME:-vexa}
+      - POSTGRES_USER=${DB_USER:-postgres}
+      - POSTGRES_PASSWORD=${DB_PASSWORD:-postgres}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - vexa_default
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-vexa}"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  bot-manager:
+    build:
+      context: .
+      dockerfile: services/bot-manager/Dockerfile
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - BOT_IMAGE_NAME=${BOT_IMAGE_NAME:-vexa-bot:latest}
+      - DOCKER_NETWORK=vexa_vexa_default
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME:-vexa}
+      - DB_USER=${DB_USER:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD:-postgres}
+      - DB_SSL_MODE=disable
+      - DOCKER_HOST=unix://var/run/docker.sock
+      - DEVICE_TYPE=remote
+      - WEBEX_BOT_TOKEN=${WEBEX_BOT_TOKEN}
+      - WHISPER_LIVE_URL=ws://whisperlive-remote:9090/ws
+      - ADMIN_TOKEN=${ADMIN_API_TOKEN}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    init: true
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - vexa_default
+    restart: unless-stopped
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: services/api-gateway/Dockerfile
+    ports:
+      - "${API_GATEWAY_HOST_PORT:-8056}:8000"
+    environment:
+      - BOT_MANAGER_URL=http://bot-manager:8080
+      - TRANSCRIPTION_COLLECTOR_URL=http://transcription-collector:8000
+      - REDIS_URL=redis://redis:6379/0
+      - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-http://10.10.10.135:8056}
+      - TRANSCRIPT_SHARE_TTL_SECONDS=900
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - WEBEX_BOT_TOKEN=${WEBEX_BOT_TOKEN}
+      - WEBEX_BOT_EMAIL=${WEBEX_BOT_EMAIL:-earwyn@webex.bot}
+      - WEBEX_WEBHOOK_SECRET=${WEBEX_WEBHOOK_SECRET}
+      # admin-api not deployed — point to a dummy or leave empty
+      - ADMIN_API_URL=http://localhost:8001
+      - MCP_URL=http://localhost:18888
+    init: true
+    depends_on:
+      bot-manager:
+        condition: service_started
+      transcription-collector:
+        condition: service_started
+    networks:
+      - vexa_default
+    restart: unless-stopped
+
+  transcription-collector:
+    build:
+      context: .
+      dockerfile: services/transcription-collector/Dockerfile
+    ports:
+      - "${TRANSCRIPTION_COLLECTOR_HOST_PORT:-8123}:8000"
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME:-vexa}
+      - DB_USER=${DB_USER:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD:-postgres}
+      - DB_SSL_MODE=disable
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_STREAM_NAME=transcription_segments
+      - REDIS_CONSUMER_GROUP=collector_group
+      - REDIS_STREAM_READ_COUNT=10
+      - REDIS_STREAM_BLOCK_MS=2000
+      - ADMIN_TOKEN=${ADMIN_API_TOKEN}
+      - BACKGROUND_TASK_INTERVAL=10
+      - IMMUTABILITY_THRESHOLD=30
+      - REDIS_SEGMENT_TTL=3600
+      - REDIS_CLEANUP_THRESHOLD=86400
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - ./alembic.ini:/app/alembic.ini
+      - ./libs/shared-models/alembic:/app/alembic
+    init: true
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - vexa_default
+    restart: unless-stopped
+
+  whisperlive-remote:
+    build:
+      context: .
+      dockerfile: services/WhisperLive/Dockerfile.cpu
+    environment:
+      - REDIS_STREAM_URL=redis://redis:6379/0/transcription_segments
+      - TRANSCRIPTION_COLLECTOR_URL=redis://redis:6379/0/transcription_segments
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - REDIS_STREAM_NAME=transcription_segments
+      - DEVICE_TYPE=remote
+      - REMOTE_TRANSCRIBER_URL=${REMOTE_TRANSCRIBER_URL:-http://10.10.10.199:8000}
+      - REMOTE_TRANSCRIBER_API_KEY=${REMOTE_TRANSCRIBER_API_KEY:-}
+      - SAME_OUTPUT_THRESHOLD=${SAME_OUTPUT_THRESHOLD:-3}
+      - MIN_AUDIO_S=${MIN_AUDIO_S:-2.0}
+      - CONSUL_ENABLE=false
+    command: --port 9090 --backend remote
+    expose:
+      - "9090"
+      - "9091"
+    deploy:
+      replicas: 1
+    init: true
+    depends_on:
+      transcription-collector:
+        condition: service_started
+    networks:
+      - vexa_default
+    restart: unless-stopped
+
+  transcript-room:
+    build:
+      context: .
+      dockerfile: services/transcript-room/Dockerfile
+    ports:
+      - "${TRANSCRIPT_ROOM_PORT:-8790}:8790"
+    environment:
+      - PORT=8790
+      - BASE_URL=${TRANSCRIPT_ROOM_BASE_URL:-http://10.10.10.135:8790}
+    networks:
+      - vexa_default
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8790/health').then(r=>{if(!r.ok)process.exit(1)})"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  redis-data:
+  postgres-data:
+
+networks:
+  vexa_default:
+    driver: bridge

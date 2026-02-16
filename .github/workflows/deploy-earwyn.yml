@@ -4,9 +4,9 @@ on:
   push:
     branches: [feature/webex-platform, main]
     paths:
-      - 'services/transcript-room/**'
-      - 'services/vexa-bot/**'
-      - 'docker-compose.yml'
+      - 'services/**'
+      - 'libs/**'
+      - 'docker-compose.earwyn.yml'
       - '.github/workflows/deploy-earwyn.yml'
   workflow_dispatch:
 
@@ -15,40 +15,65 @@ env:
 
 jobs:
   deploy:
-    name: Deploy to Earwyn VM
+    name: Deploy Vexa Stack to Earwyn
     runs-on: [self-hosted, earwyn]
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Deploy transcript-room
+      - name: Sync project to deploy dir
         run: |
           set -e
           DEPLOY=${{ env.DEPLOY_DIR }}
-          mkdir -p "$DEPLOY/services/transcript-room"
+          mkdir -p "$DEPLOY"
 
-          # Copy transcript-room service files preserving expected path structure
-          cp services/transcript-room/server.js services/transcript-room/viewer.html \
-             services/transcript-room/package.json services/transcript-room/package-lock.json \
-             services/transcript-room/Dockerfile \
-             "$DEPLOY/services/transcript-room/"
-          
-          # Use earwyn-specific compose at root
-          cp services/transcript-room/docker-compose.earwyn.yml "$DEPLOY/docker-compose.yml"
+          # Sync the entire repo (needed for monorepo builds with shared libs)
+          rsync -a --delete \
+            --exclude '.git' \
+            --exclude 'node_modules' \
+            --exclude '__pycache__' \
+            --exclude '.venv' \
+            --exclude 'hub' \
+            ./ "$DEPLOY/"
 
-          cd "$DEPLOY"
+          # Use earwyn-specific compose
+          cp "$DEPLOY/docker-compose.earwyn.yml" "$DEPLOY/docker-compose.yml"
 
-          echo "=== Building ==="
+      - name: Verify .env exists
+        run: |
+          if [ ! -f "${{ env.DEPLOY_DIR }}/.env" ]; then
+            echo "❌ .env file missing at ${{ env.DEPLOY_DIR }}/.env"
+            echo "Create it from .env.earwyn.template with actual secrets"
+            exit 1
+          fi
+          echo "✅ .env file found"
+
+      - name: Build and deploy
+        working-directory: ${{ env.DEPLOY_DIR }}
+        run: |
+          set -e
+
+          echo "=== Building images ==="
           docker compose build
 
-          echo "=== Starting ==="
+          echo "=== Starting stack ==="
           docker compose up -d
 
-          echo "=== Health check ==="
-          sleep 5
-          curl -sf http://localhost:8790/health && echo " ✅ transcript-room healthy" || echo " ❌ transcript-room unhealthy"
+          echo "=== Waiting for services ==="
+          sleep 10
 
-          echo "=== Status ==="
+          echo "=== Health checks ==="
+          # Transcript room
+          curl -sf http://localhost:8790/health && echo " ✅ transcript-room" || echo " ❌ transcript-room"
+          # API gateway
+          curl -sf http://localhost:8056/docs >/dev/null 2>&1 && echo " ✅ api-gateway" || echo " ⚠️  api-gateway (may still be starting)"
+          # Redis
+          docker compose exec -T redis redis-cli ping | grep -q PONG && echo " ✅ redis" || echo " ❌ redis"
+          # Postgres
+          docker compose exec -T postgres pg_isready -U postgres && echo " ✅ postgres" || echo " ❌ postgres"
+
+          echo ""
+          echo "=== Service status ==="
           docker compose ps
