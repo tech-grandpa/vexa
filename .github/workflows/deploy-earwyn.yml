@@ -51,6 +51,12 @@ jobs:
           fi
           echo "✅ .env file found"
 
+      - name: Stop old compose projects
+        working-directory: ${{ env.DEPLOY_DIR }}
+        run: |
+          # Stop any old "earwyn" project containers that conflict
+          docker compose -p earwyn down 2>/dev/null || true
+
       - name: Build and deploy
         working-directory: ${{ env.DEPLOY_DIR }}
         run: |
