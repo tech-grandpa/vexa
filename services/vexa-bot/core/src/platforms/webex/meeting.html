@@ -25,6 +25,7 @@
       initialized: false,
       registered: false,
       meetingCreated: false,
+      joinSignaled: false,
       joined: false,
       audioReady: false,
       meetingState: null,
@@ -154,7 +155,20 @@
         
         meeting.on('meeting:stateChange', (state) => {
           log('Meeting state changed', state);
+          const current = String(state.current || state).toUpperCase();
           window.__WEBEX_STATUS.meetingState = state.current || state;
+          
+          // Mark as joined when meeting reaches an active (non-lobby) state.
+          // This distinguishes "join signaling complete" (may be in lobby)
+          // from "actually admitted to the meeting".
+          if (['JOINED', 'ACTIVE', 'IN_MEETING', 'IN_LOBBY'].indexOf(current) === -1
+              && current !== 'IDLE' && current !== 'LOBBY' && current !== 'WAITING') {
+            // Unknown state — don't touch joined flag
+          }
+          if (current === 'JOINED' || current === 'ACTIVE' || current === 'IN_MEETING') {
+            window.__WEBEX_STATUS.joined = true;
+            log('Meeting state indicates admission — joined=true');
+          }
         });
         
         meeting.on('meeting:removed', (reason) => {
@@ -194,8 +208,13 @@
         }
         
         await meeting.join();
-        window.__WEBEX_STATUS.joined = true;
-        log('Joined meeting successfully (signaling only)');
+        window.__WEBEX_STATUS.joinSignaled = true;
+        log('Join signaling complete (may be in lobby — joined flag deferred)');
+        
+        // Don't set joined=true here! meeting.join() resolves even when
+        // the bot is placed in a lobby/waiting room. The joined flag is
+        // set by the meeting:stateChange handler when the meeting reaches
+        // an active state, or by admission.ts after successfully adding media.
         
         return { success: true };
         

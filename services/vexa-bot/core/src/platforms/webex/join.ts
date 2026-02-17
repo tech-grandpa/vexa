@@ -141,17 +141,17 @@ export async function joinWebexMeeting(
     throw new Error(`Webex SDK initialization failed: ${err.message}`);
   }
 
-  // Verify join status (initWebex sets status.joined on success)
+  // Verify join signaling completed (bot may still be in lobby)
   const status = await page.evaluate(() => (window as any).__WEBEX_STATUS);
   if (status.error) {
     throw new Error(`Webex join failed: ${status.error}`);
   }
 
-  if (!status.joined) {
-    throw new Error("Webex join failed: Unknown reason");
+  if (!status.joinSignaled) {
+    throw new Error("Webex join failed: Join signaling did not complete");
   }
 
-  log(`${botName} joined the Webex Meeting successfully.`);
+  log(`${botName} join signaling complete (admitted=${status.joined}, lobby=${!status.joined}).`);
 
   // Take screenshot after successful join
   await page.screenshot({

@@ -36,10 +36,20 @@ export async function waitForWebexAdmission(
   // Check current status
   const initialStatus = await page.evaluate(() => (window as any).__WEBEX_STATUS);
 
-  // If already joined, we're immediately admitted (no lobby)
+  // If already joined (stateChange fired JOINED/ACTIVE before we got here),
+  // we're immediately admitted (no lobby)
   if (initialStatus.joined) {
-    log("Bot immediately admitted (no lobby) — adding media...");
-    await addMediaWithRetry(page);
+    log("Bot immediately admitted (no lobby, stateChange already fired) — adding media...");
+    try {
+      await addMediaWithRetry(page);
+    } catch (mediaErr: any) {
+      // If addMedia fails despite joined=true, the bot may actually be in lobby
+      // (joined flag was set prematurely). Fall through to lobby-waiting logic.
+      log(`addMedia failed despite joined=true — falling through to lobby wait: ${mediaErr.message}`);
+      // Reset joined so the waiting logic works correctly
+      await page.evaluate(() => { (window as any).__WEBEX_STATUS.joined = false; });
+      return await waitInLobby(page, timeoutMs, botConfig);
+    }
     
     // Send AWAITING_ADMISSION callback even for immediate admission
     // to ensure state machine progresses correctly
@@ -54,6 +64,17 @@ export async function waitForWebexAdmission(
     
     return { admitted: true, rejected: false };
   }
+
+  // Not yet admitted — wait in lobby
+  return await waitInLobby(page, timeoutMs, botConfig);
+}
+
+async function waitInLobby(
+  page: Page,
+  timeoutMs: number,
+  botConfig: BotConfig
+): Promise<AdmissionResult> {
+  log("Bot is in lobby — waiting for admission...");
 
   // Send awaiting admission callback
   try {
@@ -70,15 +91,19 @@ export async function waitForWebexAdmission(
     await page.waitForFunction(
       () => {
         const status = (window as any).__WEBEX_STATUS;
-        // Check for joined state or error
+        // Check for joined state (set by stateChange handler) or error
         if (status.joined) return true;
         if (status.error) return true;
         
         // Check meeting state if available
         if (status.meetingState) {
-          if (status.meetingState === "JOINED") return true;
-          if (status.meetingState === "REJECTED") return true;
+          const state = String(status.meetingState).toUpperCase();
+          if (state === "JOINED" || state === "ACTIVE" || state === "IN_MEETING") return true;
+          if (state === "REJECTED") return true;
         }
+
+        // Check if audio stream appeared (strong signal of admission)
+        if (status.audioReady) return true;
         
         return false;
       },
@@ -93,7 +118,8 @@ export async function waitForWebexAdmission(
   const finalStatus = await page.evaluate(() => (window as any).__WEBEX_STATUS);
 
   // Check for rejection
-  if (finalStatus.meetingState === "REJECTED") {
+  const meetingState = String(finalStatus.meetingState || "").toUpperCase();
+  if (meetingState === "REJECTED") {
     log("Bot was rejected by meeting admin");
     return { admitted: false, rejected: true, reason: "admission_rejected_by_admin" };
   }
@@ -104,8 +130,8 @@ export async function waitForWebexAdmission(
     return { admitted: false, rejected: false, reason: finalStatus.error };
   }
 
-  // Check if joined — then add media (WebRTC negotiation)
-  if (finalStatus.joined) {
+  // Admitted — add media (WebRTC negotiation)
+  if (finalStatus.joined || meetingState === "JOINED" || meetingState === "ACTIVE" || meetingState === "IN_MEETING" || finalStatus.audioReady) {
     log("Bot admitted to meeting — adding media...");
     await addMediaWithRetry(page);
     return { admitted: true, rejected: false };
