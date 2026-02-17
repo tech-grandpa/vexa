@@ -88,6 +88,10 @@ async function waitInLobby(
 
   // Wait for admission or rejection
   try {
+    // NOTE: Playwright waitForFunction signature is (fn, arg, options).
+    // The timeout must be in the 3rd argument (options), NOT the 2nd (arg).
+    // Passing {timeout} as 2nd arg makes Playwright treat it as arg and
+    // use its default 30s timeout — which caused premature admission_timeout.
     await page.waitForFunction(
       () => {
         const status = (window as any).__WEBEX_STATUS;
@@ -107,6 +111,7 @@ async function waitInLobby(
         
         return false;
       },
+      undefined,
       { timeout: timeoutMs }
     );
   } catch (timeoutError) {
