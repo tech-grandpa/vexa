@@ -232,8 +232,8 @@ export async function startWebexRecording(
           for (let i = 0; i < 30; i++) {
             await new Promise((resolve) => setTimeout(resolve, 1000));
 
-            const status = window.__WEBEX_STATUS;
-            if (status.audioReady && window.__WEBEX_AUDIO_STREAM) {
+            const status = (window as any).__WEBEX_STATUS;
+            if (status.audioReady && (window as any).__WEBEX_AUDIO_STREAM) {
               audioStreamReady = true;
               break;
             }
@@ -251,7 +251,7 @@ export async function startWebexRecording(
 
           (window as any).logBot("Audio stream is ready");
 
-          const audioStream = window.__WEBEX_AUDIO_STREAM;
+          const audioStream = (window as any).__WEBEX_AUDIO_STREAM;
           if (!audioStream) {
             throw new Error("No audio stream available");
           }

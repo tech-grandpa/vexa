@@ -136,7 +136,7 @@ export async function joinWebexMeeting(
     const logs = await page.evaluate(() => (window as any).__WEBEX_LOGS);
     log("Failed to initialize Webex SDK. Page logs:");
     logs.forEach((logEntry: any) => {
-      log(`  [${logEntry.timestamp}] ${logEntry.message}`, logEntry.data);
+      log(`  [${logEntry.timestamp}] ${logEntry.message} ${JSON.stringify(logEntry.data)}`);
     });
     throw new Error(`Webex SDK initialization failed: ${err.message}`);
   }
