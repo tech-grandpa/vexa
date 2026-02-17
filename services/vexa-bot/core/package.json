@@ -7,7 +7,7 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "build": "tsc && node build-browser-utils.js",
+    "build": "tsc && cp src/platforms/webex/meeting.html dist/platforms/webex/meeting.html && node build-browser-utils.js",
     "build-browser": "node build-browser-utils.js",
     "dev": "tsx src/index.ts"
   },
