@@ -83,9 +83,17 @@ async def _webex_api_post(path: str, token: str, data: dict) -> dict:
         return resp.json()
 
 
+def _get_internal_api_key() -> str:
+    key = os.getenv("INTERNAL_API_KEY", "")
+    if not key:
+        raise RuntimeError("INTERNAL_API_KEY not configured")
+    return key
+
+
 async def _launch_bot(meeting_url: str, bot_token: str) -> dict:
     """Call bot-manager to launch a bot for the given meeting."""
     bot_manager_url = _get_bot_manager_url()
+    internal_key = _get_internal_api_key()
     payload = {
         "platform": "webex",
         "native_meeting_id": meeting_url,
@@ -96,6 +104,7 @@ async def _launch_bot(meeting_url: str, bot_token: str) -> dict:
         resp = await client.post(
             f"{bot_manager_url}/bots",
             json=payload,
+            headers={"X-API-Key": internal_key},
             timeout=30.0,
         )
         if resp.status_code in (200, 201):

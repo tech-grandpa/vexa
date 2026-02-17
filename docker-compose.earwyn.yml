@@ -82,6 +82,7 @@ services:
       - WEBEX_BOT_TOKEN=${WEBEX_BOT_TOKEN}
       - WEBEX_BOT_EMAIL=${WEBEX_BOT_EMAIL:-earwyn@webex.bot}
       - WEBEX_WEBHOOK_SECRET=${WEBEX_WEBHOOK_SECRET}
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
       # admin-api not deployed — point to a dummy or leave empty
       - ADMIN_API_URL=http://localhost:8001
       - MCP_URL=http://localhost:18888
