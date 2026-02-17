@@ -4,7 +4,7 @@ import { BotConfig } from "./types"; // Import the BotConfig type
 
 // Define a schema that matches your JSON configuration
 export const BotConfigSchema = z.object({
-  platform: z.enum(["google_meet", "zoom", "teams"]),
+  platform: z.enum(["google_meet", "zoom", "teams", "webex"]),
   meetingUrl: z.string().url().nullable(), // Allow null from BOT_CONFIG
   botName: z.string(),
   token: z.string(),
