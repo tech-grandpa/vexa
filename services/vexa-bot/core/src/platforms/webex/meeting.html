@@ -159,15 +159,25 @@
           window.__WEBEX_STATUS.meetingState = state.current || state;
           
           // Mark as joined when meeting reaches an active (non-lobby) state.
-          // This distinguishes "join signaling complete" (may be in lobby)
-          // from "actually admitted to the meeting".
-          if (['JOINED', 'ACTIVE', 'IN_MEETING', 'IN_LOBBY'].indexOf(current) === -1
-              && current !== 'IDLE' && current !== 'LOBBY' && current !== 'WAITING') {
-            // Unknown state — don't touch joined flag
-          }
           if (current === 'JOINED' || current === 'ACTIVE' || current === 'IN_MEETING') {
             window.__WEBEX_STATUS.joined = true;
             log('Meeting state indicates admission — joined=true');
+          }
+        });
+        
+        // CRITICAL: The Webex SDK may not fire meeting:stateChange when
+        // transitioning from lobby to meeting. Use members:update as a
+        // fallback signal — if we see members, we're in the meeting.
+        meeting.on('members:update', (delta) => {
+          log('Members updated', {
+            added: delta?.added?.length || 0,
+            removed: delta?.removed?.length || 0,
+            total: meeting.members?.membersCollection?.length || 0
+          });
+          // If we see a members update and join was signaled, we're admitted
+          if (window.__WEBEX_STATUS.joinSignaled && !window.__WEBEX_STATUS.joined) {
+            window.__WEBEX_STATUS.joined = true;
+            log('Members update detected after join — marking as admitted (joined=true)');
           }
         });
         
@@ -182,14 +192,7 @@
           window.__WEBEX_STATUS.ended = true;
         });
         
-        // Track members for participant count
-        meeting.on('members:update', (delta) => {
-          log('Members updated', {
-            added: delta?.added?.length || 0,
-            removed: delta?.removed?.length || 0,
-            total: meeting.members?.membersCollection?.length || 0
-          });
-        });
+        // (members:update handler is above with admission detection)
         
         // Track active speaker changes
         meeting.on('meeting:activeSpeakerChanged', (payload) => {
