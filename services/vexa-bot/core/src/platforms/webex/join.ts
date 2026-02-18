@@ -72,6 +72,14 @@ export async function joinWebexMeeting(
   const htmlUrl = `http://127.0.0.1:${port}/meeting.html`;
 
   log(`Loading Webex SDK host page via HTTP: ${htmlUrl}`);
+  // Forward browser console to Node stdout for debugging
+  page.on('console', (msg) => {
+    const text = msg.text();
+    if (text.includes('[WebexSDK]')) {
+      log(`[BROWSER] ${text}`);
+    }
+  });
+
   await page.goto(htmlUrl, { waitUntil: "networkidle" });
   await page.bringToFront();
 
