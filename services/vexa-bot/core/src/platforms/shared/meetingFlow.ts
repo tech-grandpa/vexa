@@ -41,6 +41,7 @@ export type PlatformStrategies = {
   startRecording: (page: Page, botConfig: BotConfig) => Promise<void>;
   startRemovalMonitor: (page: Page, onRemoval?: () => void | Promise<void>) => () => void;
   leave: (page: Page | null, botConfig?: BotConfig, reason?: LeaveReason) => Promise<boolean>;
+  addMedia?: (page: Page) => Promise<void>;
 };
 
 export async function runMeetingFlow(
@@ -119,6 +120,25 @@ export async function runMeetingFlow(
 
       await gracefulLeaveFunction(page, 0, decision.reason || "admission_timeout");
       return;
+    }
+
+    // Add media (WebRTC negotiation) now that admission is confirmed
+    if (strategies.addMedia) {
+      try {
+        log("Adding media post-admission...");
+        await strategies.addMedia(page);
+        log("Media added successfully post-admission");
+      } catch (mediaErr: any) {
+        const errorDetails = {
+          error_message: mediaErr?.message,
+          error_stack: mediaErr?.stack,
+          context: "add_media_post_admission",
+          platform,
+          timestamp: new Date().toISOString()
+        };
+        await gracefulLeaveFunction(page, 1, "media_failed", errorDetails);
+        return;
+      }
     }
 
     // CRITICAL: If bot was immediately admitted, ensure AWAITING_ADMISSION state is processed before ACTIVE

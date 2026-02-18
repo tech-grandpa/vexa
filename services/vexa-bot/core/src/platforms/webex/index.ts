@@ -7,6 +7,7 @@ import { joinWebexMeeting } from "./join";
 import {
   waitForWebexAdmission,
   checkForWebexAdmissionSilent,
+  addMediaWithRetry,
 } from "./admission";
 import { startWebexRecording } from "./recording";
 import { prepareForWebexRecording, leaveWebex } from "./leave";
@@ -47,6 +48,7 @@ export async function handleWebex(
     startRecording: startWebexRecording,
     startRemovalMonitor: startWebexRemovalMonitor,
     leave: leaveWebex,
+    addMedia: addMediaWithRetry,
   };
 
   await runMeetingFlow(

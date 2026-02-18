@@ -26,6 +26,8 @@ async function addMediaWithRetry(page: Page, maxAttempts = 6): Promise<void> {
   }
 }
 
+export { addMediaWithRetry };
+
 export async function waitForWebexAdmission(
   page: Page,
   timeoutMs: number,
@@ -39,17 +41,7 @@ export async function waitForWebexAdmission(
   // If already joined (stateChange fired JOINED/ACTIVE before we got here),
   // we're immediately admitted (no lobby)
   if (initialStatus.joined) {
-    log("Bot immediately admitted (no lobby, stateChange already fired) — adding media...");
-    try {
-      await addMediaWithRetry(page);
-    } catch (mediaErr: any) {
-      // If addMedia fails despite joined=true, the bot may actually be in lobby
-      // (joined flag was set prematurely). Fall through to lobby-waiting logic.
-      log(`addMedia failed despite joined=true — falling through to lobby wait: ${mediaErr.message}`);
-      // Reset joined so the waiting logic works correctly
-      await page.evaluate(() => { (window as any).__WEBEX_STATUS.joined = false; });
-      return await waitInLobby(page, timeoutMs, botConfig);
-    }
+    log("Bot immediately admitted (no lobby, stateChange already fired)");
     
     // Send AWAITING_ADMISSION callback even for immediate admission
     // to ensure state machine progresses correctly
@@ -137,8 +129,7 @@ async function waitInLobby(
 
   // Admitted — add media (WebRTC negotiation)
   if (finalStatus.joined || meetingState === "JOINED" || meetingState === "ACTIVE" || meetingState === "IN_MEETING" || finalStatus.audioReady) {
-    log("Bot admitted to meeting — adding media...");
-    await addMediaWithRetry(page);
+    log("Bot admitted to meeting");
     return { admitted: true, rejected: false };
   }
 

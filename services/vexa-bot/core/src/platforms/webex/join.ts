@@ -73,14 +73,13 @@ export async function joinWebexMeeting(
 
   log(`Loading Webex SDK host page via HTTP: ${htmlUrl}`);
   // Forward browser console to Node stdout for debugging
+  await page.goto(htmlUrl, { waitUntil: "networkidle" });
+
+  // Register console handler AFTER page.goto() so it captures from the loaded page
   page.on('console', (msg) => {
     const text = msg.text();
-    if (text.includes('[WebexSDK]')) {
-      log(`[BROWSER] ${text}`);
-    }
+    log(`[BROWSER] ${text}`);
   });
-
-  await page.goto(htmlUrl, { waitUntil: "networkidle" });
   await page.bringToFront();
 
   // Take screenshot after navigation
