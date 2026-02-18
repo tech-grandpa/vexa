@@ -441,7 +441,7 @@ export async function runBot(botConfig: BotConfig): Promise<void> {// Store botC
     
     page = await context.newPage();
   } else {
-    log("Using Chrome browser for non-Teams platform");
+    log("Using MS Edge browser for non-Teams platform (H264 codec support)");
     // Use Stealth Plugin for non-Teams platforms
     const stealthPlugin = StealthPlugin();
     stealthPlugin.enabledEvasions.delete("iframe.contentWindow");
@@ -450,6 +450,7 @@ export async function runBot(botConfig: BotConfig): Promise<void> {// Store botC
 
     browserInstance = await chromium.launch({
       headless: false,
+      channel: 'msedge',
       args: browserArgs,
     });
 
