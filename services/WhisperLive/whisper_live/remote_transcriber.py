@@ -327,17 +327,18 @@ class RemoteTranscriber:
                 
                 response.raise_for_status()
                 
-                # Parse response
-                if self.response_format == "verbose_json" or self.response_format == "json":
-                    result = response.json()
-                    return result
-                else:
-                    text = response.text.strip()
-                    if text.startswith("{") or text.startswith("["):
+                # Parse response — check actual content type, not just requested format
+                content_type = response.headers.get("content-type", "")
+                text = response.text.strip()
+                
+                if "application/json" in content_type or text.startswith("{") or text.startswith("["):
+                    try:
                         result = response.json()
                         return result
-                    else:
-                        return {"text": text}
+                    except Exception:
+                        return {"text": text} if text else {"text": ""}
+                else:
+                    return {"text": text} if text else {"text": ""}
                     
             except httpx.HTTPStatusError as e:
                 # Handle HTTP errors (but not 429/503 which are handled above)

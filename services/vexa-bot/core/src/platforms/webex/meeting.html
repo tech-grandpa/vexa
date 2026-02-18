@@ -153,6 +153,9 @@
           if (media.type === 'remoteAudio') {
             window.__WEBEX_AUDIO_STREAM = null;
             window.__WEBEX_STATUS.audioReady = false;
+            // Remote audio stopped is a strong signal the meeting ended
+            log('Remote audio stopped — setting ended=true');
+            window.__WEBEX_STATUS.ended = true;
           }
         });
         
@@ -162,9 +165,11 @@
         });
         
         meeting.on('meeting:stateChange', (state) => {
-          log('Meeting state changed', state);
-          const current = String(state.current || state).toUpperCase();
-          window.__WEBEX_STATUS.meetingState = state.current || state;
+          // state can be {payload: {currentState, previousState}} or a string
+          const payload = state && state.payload ? state.payload : state;
+          const current = String(payload.currentState || payload.current || payload).toUpperCase();
+          log('Meeting state changed', { current, raw: JSON.stringify(state).slice(0, 200) });
+          window.__WEBEX_STATUS.meetingState = current;
           
           // Mark as joined when meeting reaches an active (non-lobby) state.
           if (current === 'JOINED' || current === 'ACTIVE' || current === 'IN_MEETING') {
