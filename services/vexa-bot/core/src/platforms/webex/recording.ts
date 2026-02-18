@@ -259,15 +259,22 @@ export async function startWebexRecording(
           // Set up callbacks
           (window as any).__vexaOnMessage = (data: any) => {
             try {
-              audioService.processTranscription(
-                data,
-                whisperLiveService,
-                (window as any).__vexaBotConfig
-              );
+              // Handle WhisperLive protocol messages
+              if (data["status"] === "ERROR") {
+                (window as any).logBot(`Webex WebSocket Server Error: ${data["message"]}`);
+              } else if (data["status"] === "WAIT") {
+                (window as any).logBot(`Webex Server busy: ${data["message"]}`);
+              } else if (!whisperLiveService.isReady() && data["status"] === "SERVER_READY") {
+                whisperLiveService.setServerReady(true);
+                (window as any).logBot("Webex Server is ready.");
+              } else if (data["language"]) {
+                (window as any).logBot(`Webex Language detected: ${data["language"]}`);
+              } else if (data["message"] === "DISCONNECT") {
+                (window as any).logBot("Webex Server requested disconnect.");
+                whisperLiveService.close();
+              }
 
-              // Forward only finalized transcript segments to the live viewer room.
-              // WhisperLive sends intermediate updates; we only forward when
-              // is_final is true (or absent, for compatibility with simple backends).
+              // Forward finalized transcript segments to the live viewer room.
               const isFinal = data.is_final !== false;
               if (isFinal && data && data.text && data.text.trim()) {
                 (window as any).__onTranscriptSegment(
@@ -350,7 +357,91 @@ export async function startWebexRecording(
           (window as any).__vexaAudioProcessor = processor;
           (window as any).__vexaAudioSource = source;
 
-          resolve();
+          // --- Stay alive: monitor meeting state until it ends ---
+          const leaveCfg = (botConfigData && (botConfigData as any).automaticLeave) || {};
+          const startupAloneTimeoutSeconds = Number(leaveCfg.startupAloneTimeoutSeconds ?? 10);
+          const everyoneLeftTimeoutSeconds = Number(leaveCfg.everyoneLeftTimeoutSeconds ?? 10);
+
+          let aloneTime = 0;
+          let hasEverHadOtherParticipants = false;
+
+          const checkForMeetingEnd = () => {
+            try {
+              const status = (window as any).__WEBEX_STATUS;
+              if (status && status.error) {
+                (window as any).logBot(`🚨 Webex error detected: ${status.error}`);
+                return 'error';
+              }
+              // Check if meeting object reports ended
+              if (status && status.meetingEnded) {
+                (window as any).logBot('🚨 Webex meeting ended detected via status');
+                return 'ended';
+              }
+              return null;
+            } catch {
+              return null;
+            }
+          };
+
+          const monitorInterval = setInterval(() => {
+            // Check for meeting end
+            const endState = checkForMeetingEnd();
+            if (endState) {
+              (window as any).logBot(`Webex meeting ended (${endState}). Stopping recorder...`);
+              clearInterval(monitorInterval);
+              audioContext.close().catch(() => {});
+              whisperLiveService.close();
+              resolve();
+              return;
+            }
+
+            // Check participant count if available
+            const participantCount = (window as any).__WEBEX_PARTICIPANT_COUNT;
+            const otherParticipants = typeof participantCount === 'number' ? participantCount : -1;
+
+            if (otherParticipants > 0) {
+              hasEverHadOtherParticipants = true;
+              aloneTime = 0;
+            } else if (otherParticipants === 0) {
+              aloneTime++;
+              const timeout = hasEverHadOtherParticipants ? everyoneLeftTimeoutSeconds : startupAloneTimeoutSeconds;
+              const mode = hasEverHadOtherParticipants ? 'everyone_left' : 'startup_alone';
+
+              if (aloneTime % 10 === 0) {
+                (window as any).logBot(`⏱️ Webex bot alone: ${aloneTime}s/${timeout}s (${mode})`);
+              }
+
+              if (aloneTime >= timeout) {
+                const token = hasEverHadOtherParticipants ? 'WEBEX_BOT_LEFT_ALONE_TIMEOUT' : 'WEBEX_BOT_STARTUP_ALONE_TIMEOUT';
+                (window as any).logBot(`Webex bot alone timeout (${mode}). Stopping recorder...`);
+                clearInterval(monitorInterval);
+                audioContext.close().catch(() => {});
+                whisperLiveService.close();
+                reject(new Error(token));
+                return;
+              }
+            }
+            // If participantCount is -1 (not tracked), just keep running
+          }, 1000);
+
+          // Listen for page unload
+          window.addEventListener("beforeunload", () => {
+            (window as any).logBot("Webex page is unloading. Stopping recorder...");
+            clearInterval(monitorInterval);
+            audioContext.close().catch(() => {});
+            whisperLiveService.close();
+            resolve();
+          });
+
+          document.addEventListener("visibilitychange", () => {
+            if (document.visibilityState === "hidden") {
+              (window as any).logBot("Webex document is hidden. Stopping recorder...");
+              clearInterval(monitorInterval);
+              audioContext.close().catch(() => {});
+              whisperLiveService.close();
+              resolve();
+            }
+          });
         })().catch(reject);
       });
     },
