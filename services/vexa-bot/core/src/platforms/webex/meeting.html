@@ -249,14 +249,19 @@
         if (!window.__WEBEX_MEETING) {
           throw new Error('No active meeting — call initWebex first');
         }
-        log('Adding media (receive audio only)...');
+        log('Adding media (receive audio only, no video)...');
+        // Webex JS SDK v3.x API: pass no localStreams and disable video
+        // to avoid H264 codec requirement in headless Chrome.
+        // audioEnabled=true ensures remote audio is received even without
+        // a local microphone stream. videoEnabled=false prevents the SDK
+        // from adding a video m-line to the SDP offer entirely.
         await window.__WEBEX_MEETING.addMedia({
-          mediaOptions: {
-            receiveAudio: true,
-            receiveVideo: false,
-            sendAudio: false,
-            sendVideo: false
-          }
+          localStreams: {},
+          audioEnabled: true,
+          videoEnabled: false,
+          shareAudioEnabled: false,
+          shareVideoEnabled: false,
+          allowMediaInLobby: true
         });
         log('Media added successfully');
         return { success: true };
