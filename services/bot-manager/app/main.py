@@ -299,6 +299,15 @@ class BotStatusChangePayload(BaseModel):
     failure_stage: Optional[MeetingFailureStage] = Field(None, description="Stage where failure occurred if applicable.")
     timestamp: Optional[str] = Field(None, description="Timestamp of the status change.")
 
+class TranscriptViewerCallbackPayload(BaseModel):
+    """Payload for live transcript viewer URL callback."""
+    connection_id: str = Field(..., description="The connection ID of the bot session.")
+    viewer_url: str = Field(..., description="The live transcript viewer URL.")
+    meeting_id: Optional[int] = Field(None, description="Internal meeting ID if known.")
+    meeting_url: Optional[str] = Field(None, description="Meeting URL if available.")
+    event: Optional[str] = Field("transcript_room_created", description="Event name for callback routing.")
+    timestamp: Optional[str] = Field(None, description="Timestamp of room creation.")
+
 # --- --------------------------------------------- ---
 
 @app.on_event("startup")
@@ -1522,6 +1531,80 @@ async def bot_status_change_callback(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An internal error occurred while processing the bot status change callback."
+        )
+
+@app.post("/bots/internal/callback/transcript_viewer",
+          status_code=status.HTTP_200_OK,
+          summary="Callback for live transcript viewer URL",
+          include_in_schema=False)
+@app.post("/bots/internal/callback/transcript_url",
+          status_code=status.HTTP_200_OK,
+          summary="Callback for live transcript viewer URL",
+          include_in_schema=False)
+async def bot_transcript_viewer_callback(
+    payload: TranscriptViewerCallbackPayload,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Stores the live transcript viewer URL on the meeting record and triggers
+    a webhook notification so user integrations can surface it immediately.
+    """
+    logger.info(
+        "Received transcript viewer callback: connection_id=%s, viewer_url=%s",
+        payload.connection_id,
+        payload.viewer_url
+    )
+
+    try:
+        session_stmt = select(MeetingSession).where(MeetingSession.session_uid == payload.connection_id)
+        session_result = await db.execute(session_stmt)
+        meeting_session = session_result.scalars().first()
+
+        if not meeting_session:
+            logger.error(
+                "Transcript viewer callback: Could not find meeting session for connection_id %s",
+                payload.connection_id
+            )
+            return {"status": "error", "detail": "Meeting session not found"}
+
+        meeting = await db.get(Meeting, meeting_session.meeting_id)
+        if not meeting:
+            logger.error(
+                "Transcript viewer callback: Could not find meeting %s",
+                meeting_session.meeting_id
+            )
+            return {"status": "error", "detail": "Meeting not found"}
+
+        old_status = meeting.status
+        current_data = dict(meeting.data) if isinstance(meeting.data, dict) else {}
+        current_data["transcript_viewer_url"] = payload.viewer_url
+        current_data["transcript_viewer_updated_at"] = payload.timestamp or datetime.utcnow().isoformat()
+        meeting.data = current_data
+        await db.commit()
+        await db.refresh(meeting)
+
+        await schedule_status_webhook_task(
+            meeting=meeting,
+            background_tasks=background_tasks,
+            old_status=old_status,
+            new_status=meeting.status,
+            reason="transcript_room_created",
+            transition_source="bot_callback"
+        )
+
+        return {
+            "status": "processed",
+            "meeting_id": meeting.id,
+            "meeting_status": meeting.status,
+            "viewer_url": payload.viewer_url
+        }
+    except Exception as e:
+        logger.error(f"Transcript viewer callback: An unexpected error occurred: {e}", exc_info=True)
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An internal error occurred while processing the transcript viewer callback."
         )
 
 # --- RECONCILIATION TASK: Detect and fix zombie meetings and orphan containers ---

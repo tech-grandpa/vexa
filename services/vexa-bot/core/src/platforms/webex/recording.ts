@@ -59,17 +59,11 @@ export async function startWebexRecording(
     const room = await transcriptRoom.createRoom(meetingIdStr);
     log(`[TranscriptRoom] Live viewer: ${room.viewerUrl}`);
 
-    // Notify about the viewer URL
-    // The URL can be delivered via:
-    //  - Webex meeting chat (if bot has messaging scope)
-    //  - Webhook callback to bot-manager
-    //  - Simply logged for the host to share
-    if (botConfig.data?.access_token) {
-      try {
-        await postViewerUrlToMeeting(page, room.viewerUrl, botConfig);
-      } catch (err: any) {
-        log(`[TranscriptRoom] Could not post viewer URL: ${err.message}`);
-      }
+    // Notify about the viewer URL as early as possible.
+    try {
+      await postViewerUrlToMeeting(room.viewerUrl, botConfig);
+    } catch (err: any) {
+      log(`[TranscriptRoom] Could not post viewer URL: ${err.message}`);
     }
   } catch (err: any) {
     log(`[TranscriptRoom] Failed to create room (continuing without live viewer): ${err.message}`);
@@ -364,6 +358,7 @@ export async function startWebexRecording(
 
           let aloneTime = 0;
           let hasEverHadOtherParticipants = false;
+          const endedStateTokens = ['INACTIVE', 'TERMINATING', 'ENDED', 'LEFT', 'DISCONNECT', 'DESTROYED'];
 
           const checkForMeetingEnd = () => {
             try {
@@ -380,6 +375,19 @@ export async function startWebexRecording(
               if (status && status.removed) {
                 (window as any).logBot(`🚨 Webex bot removed from meeting: ${status.removalReason}`);
                 return 'removed';
+              }
+              const meetingState = typeof status?.meetingState === 'string' ? status.meetingState.toUpperCase() : '';
+              if (meetingState && endedStateTokens.some((token) => meetingState.includes(token))) {
+                (window as any).logBot(`🚨 Webex meeting ended via state=${meetingState}`);
+                return 'ended_state';
+              }
+              const stream = (window as any).__WEBEX_AUDIO_STREAM as MediaStream | null;
+              if (stream && typeof stream.getAudioTracks === 'function') {
+                const tracks = stream.getAudioTracks();
+                if (tracks.length > 0 && tracks.every((track) => track.readyState === 'ended')) {
+                  (window as any).logBot('🚨 Webex remote audio tracks ended');
+                  return 'audio_tracks_ended';
+                }
               }
               return null;
             } catch {
@@ -462,27 +470,62 @@ export async function startWebexRecording(
  * Notify about the live transcript viewer URL.
  *
  * Delivery strategies (tried in order):
- * 1. Webhook callback to bot-manager (if configured) — most reliable
- * 2. Webex REST API direct message to meeting host (if hostEmail available)
- * 3. Log only (always happens as fallback)
+ * 1. Bot-manager callback (derived from botManagerCallbackUrl) — primary
+ * 2. Explicit webhook callback URL (env or platform data)
+ * 3. Webex REST API direct message to meeting host (if hostEmail/access token available)
+ * 4. Log only (always happens as fallback)
  */
-async function postViewerUrlToMeeting(_page: Page, viewerUrl: string, botConfig: BotConfig): Promise<void> {
-  // Strategy 1: Webhook callback to bot-manager
-  const callbackUrl = process.env.TRANSCRIPT_URL_CALLBACK || botConfig.data?.transcriptUrlCallback;
-  if (callbackUrl) {
+async function postViewerUrlToMeeting(viewerUrl: string, botConfig: BotConfig): Promise<void> {
+  // Strategy 1: Bot-manager internal callback, derived from the standard callback URL.
+  const botManagerBaseCallback = botConfig.botManagerCallbackUrl;
+  const botManagerViewerCallback = deriveViewerCallbackUrl(botManagerBaseCallback);
+  if (botManagerViewerCallback) {
     try {
-      await fetch(callbackUrl, {
+      const resp = await fetch(botManagerViewerCallback, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         signal: AbortSignal.timeout(10000),
         body: JSON.stringify({
           event: 'transcript_room_created',
-          viewerUrl,
-          meetingId: botConfig.meeting_id,
-          meetingUrl: botConfig.meetingUrl,
+          connection_id: botConfig.connectionId,
+          viewer_url: viewerUrl,
+          meeting_id: botConfig.meeting_id,
+          meeting_url: botConfig.meetingUrl,
+          timestamp: new Date().toISOString(),
         }),
       });
+      if (!resp.ok) {
+        const body = await resp.text().catch(() => '');
+        throw new Error(`HTTP ${resp.status}${body ? `: ${body.slice(0, 160)}` : ''}`);
+      }
+      log(`[TranscriptRoom] Viewer URL sent to bot-manager callback: ${botManagerViewerCallback}`);
+      return;
+    } catch (err: any) {
+      log(`[TranscriptRoom] Bot-manager callback failed: ${err.message}, trying next strategy`);
+    }
+  }
 
+  // Strategy 2: Explicit webhook callback URL
+  const callbackUrl = process.env.TRANSCRIPT_URL_CALLBACK || botConfig.data?.transcriptUrlCallback;
+  if (callbackUrl) {
+    try {
+      const resp = await fetch(callbackUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(10000),
+        body: JSON.stringify({
+          event: 'transcript_room_created',
+          viewer_url: viewerUrl,
+          meeting_id: botConfig.meeting_id,
+          meeting_url: botConfig.meetingUrl,
+          connection_id: botConfig.connectionId,
+          timestamp: new Date().toISOString(),
+        }),
+      });
+      if (!resp.ok) {
+        const body = await resp.text().catch(() => '');
+        throw new Error(`HTTP ${resp.status}${body ? `: ${body.slice(0, 160)}` : ''}`);
+      }
       log(`[TranscriptRoom] Viewer URL sent via callback to ${callbackUrl}`);
       return;
     } catch (err: any) {
@@ -490,7 +533,7 @@ async function postViewerUrlToMeeting(_page: Page, viewerUrl: string, botConfig:
     }
   }
 
-  // Strategy 2: Direct message to host via Webex REST API (Node.js native fetch)
+  // Strategy 3: Direct message to host via Webex REST API (Node.js native fetch)
   const hostEmail = botConfig.data?.hostEmail;
   const accessToken = botConfig.data?.access_token;
   if (hostEmail && accessToken) {
@@ -518,6 +561,23 @@ async function postViewerUrlToMeeting(_page: Page, viewerUrl: string, botConfig:
     }
   }
 
-  // Strategy 3: Log only (always)
+  // Strategy 4: Log only (always)
   log(`[TranscriptRoom] Viewer URL (share manually): ${viewerUrl}`);
+}
+
+function deriveViewerCallbackUrl(botManagerCallbackUrl?: string): string | null {
+  if (!botManagerCallbackUrl) {
+    return null;
+  }
+  try {
+    const parsed = new URL(botManagerCallbackUrl);
+    if (parsed.pathname.endsWith('/exited')) {
+      parsed.pathname = parsed.pathname.replace(/\/exited$/, '/transcript_viewer');
+    } else {
+      parsed.pathname = parsed.pathname.replace(/\/$/, '') + '/transcript_viewer';
+    }
+    return parsed.toString();
+  } catch {
+    return null;
+  }
 }

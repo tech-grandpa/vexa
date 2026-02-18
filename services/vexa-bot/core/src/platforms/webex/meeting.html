@@ -45,6 +45,62 @@
     // Mitigations: page runs in headless Playwright with no user-facing content,
     // and the local HTTP server binds to 127.0.0.1 only.
     window.__WEBEX_CONFIG = null;
+
+    const WEBEX_ACTIVE_STATES = new Set(['JOINED', 'ACTIVE', 'IN_MEETING']);
+    const WEBEX_ENDED_STATES = new Set([
+      'INACTIVE',
+      'TERMINATING',
+      'ENDED',
+      'LEFT',
+      'DISCONNECTED',
+      'DESTROYED'
+    ]);
+
+    function safeSerialize(value, maxLen = 500) {
+      try {
+        const asString = typeof value === 'string' ? value : JSON.stringify(value);
+        return asString.length > maxLen ? asString.slice(0, maxLen) : asString;
+      } catch {
+        return '[unserializable]';
+      }
+    }
+
+    function normalizeStateValue(value) {
+      if (value == null) {
+        return null;
+      }
+      if (typeof value === 'string') {
+        const upper = value.trim().toUpperCase();
+        return upper
+          .replace(/^MEETING_STATE\./, '')
+          .replace(/^STATE_/, '');
+      }
+      if (typeof value === 'object') {
+        return (
+          normalizeStateValue(value.currentState) ||
+          normalizeStateValue(value.current) ||
+          normalizeStateValue(value.state?.currentState) ||
+          normalizeStateValue(value.state?.current) ||
+          normalizeStateValue(value.payload) ||
+          normalizeStateValue(value.state) ||
+          normalizeStateValue(value.detail) ||
+          null
+        );
+      }
+      return null;
+    }
+
+    function isEndedState(state) {
+      if (!state) return false;
+      if (WEBEX_ENDED_STATES.has(state)) return true;
+      return /INACTIVE|TERMINATING|ENDED|LEFT|DISCONNECT|DESTROYED/.test(state);
+    }
+
+    function markMeetingEnded(reason, data) {
+      if (window.__WEBEX_STATUS.ended) return;
+      window.__WEBEX_STATUS.ended = true;
+      log(`Meeting end detected (${reason}) — setting ended=true`, data);
+    }
     
     function log(message, data) {
       const logEntry = {
@@ -110,7 +166,12 @@
         // Log ALL events from the meeting object to discover admission signals
         const originalEmit = meeting.emit.bind(meeting);
         meeting.emit = function(event, ...args) {
-          log('EVENT: ' + event, args.length > 0 ? JSON.stringify(args[0]).substring(0, 200) : '');
+          const eventPreview = args.length > 0 ? safeSerialize(args[0], 200) : '';
+          log('EVENT: ' + event, eventPreview);
+          const eventName = String(event || '').toLowerCase();
+          if (eventName.includes('remote-ended')) {
+            markMeetingEnded(`emit:${eventName}`, { event: eventName, payload: eventPreview });
+          }
           return originalEmit(event, ...args);
         };
 
@@ -121,6 +182,13 @@
           if (media.type === 'remoteAudio') {
             window.__WEBEX_AUDIO_STREAM = media.stream;
             window.__WEBEX_STATUS.audioReady = true;
+
+            media.stream.getAudioTracks().forEach((track) => {
+              track.addEventListener('ended', () => {
+                log('Remote audio track ended', { trackId: track.id });
+                markMeetingEnded('remoteAudio.track.ended');
+              });
+            });
             
             // CRITICAL: Attach stream to an <audio> element so Chrome
             // actually decodes WebRTC RTP packets. Without this,
@@ -154,8 +222,7 @@
             window.__WEBEX_AUDIO_STREAM = null;
             window.__WEBEX_STATUS.audioReady = false;
             // Remote audio stopped is a strong signal the meeting ended
-            log('Remote audio stopped — setting ended=true');
-            window.__WEBEX_STATUS.ended = true;
+            markMeetingEnded('media:stopped.remoteAudio');
           }
         });
         
@@ -165,23 +232,28 @@
         });
         
         meeting.on('meeting:stateChange', (state) => {
-          // state can be {payload: {currentState, previousState}} or a string
           const payload = state && state.payload ? state.payload : state;
-          const current = String(payload.currentState || payload.current || payload).toUpperCase();
-          log('Meeting state changed', { current, raw: JSON.stringify(state).slice(0, 200) });
-          window.__WEBEX_STATUS.meetingState = current;
+          const current = normalizeStateValue(payload);
+          const previous = normalizeStateValue(payload?.previousState || payload?.previous);
+          log('Meeting state changed', { current, previous, raw: safeSerialize(state) });
+          window.__WEBEX_STATUS.meetingState = current || null;
           
           // Mark as joined when meeting reaches an active (non-lobby) state.
-          if (current === 'JOINED' || current === 'ACTIVE' || current === 'IN_MEETING') {
+          if (current && WEBEX_ACTIVE_STATES.has(current)) {
             window.__WEBEX_STATUS.joined = true;
             log('Meeting state indicates admission — joined=true');
           }
           
           // Detect meeting end via state change (meeting:ended may not always fire)
-          if (current === 'INACTIVE' || current === 'TERMINATING' || current === 'ENDED' || current === 'LEFT') {
-            log('Meeting state indicates end — setting ended=true');
-            window.__WEBEX_STATUS.ended = true;
+          if (current && isEndedState(current)) {
+            markMeetingEnded(`meeting:stateChange:${current}`, { previous });
           }
+        });
+
+        // Fallback observed in production logs when hosts end the meeting.
+        meeting.on('client.call.remote-ended', (payload) => {
+          log('Call remote-ended event received', { payload: safeSerialize(payload, 200) });
+          markMeetingEnded('client.call.remote-ended');
         });
         
         // Lobby detection: SDK fires meeting:self:lobbyWaiting when placed in lobby
@@ -215,7 +287,7 @@
         
         meeting.on('meeting:ended', () => {
           log('Meeting ended by host');
-          window.__WEBEX_STATUS.ended = true;
+          markMeetingEnded('meeting:ended');
         });
         
         // (members:update handler is above with admission detection)

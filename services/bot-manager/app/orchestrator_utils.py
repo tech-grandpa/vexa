@@ -242,6 +242,7 @@ async def start_bot_container(
         f"BOT_CONFIG={bot_config_json}",
         f"WHISPER_LIVE_URL={whisper_live_url_for_bot}", # Use the URL from bot-manager's env
         f"TRANSCRIPT_ROOM_URL={transcript_room_url}",
+        f"TRANSCRIPT_URL_CALLBACK=http://bot-manager:8080/bots/internal/callback/transcript_viewer",
         f"LOG_LEVEL={os.getenv('LOG_LEVEL', 'INFO').upper()}",
     ]
 
