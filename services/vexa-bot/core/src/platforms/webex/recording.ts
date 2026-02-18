@@ -372,10 +372,14 @@ export async function startWebexRecording(
                 (window as any).logBot(`🚨 Webex error detected: ${status.error}`);
                 return 'error';
               }
-              // Check if meeting object reports ended
-              if (status && status.meetingEnded) {
-                (window as any).logBot('🚨 Webex meeting ended detected via status');
+              // Check if meeting ended or bot was removed
+              if (status && status.ended) {
+                (window as any).logBot('🚨 Webex meeting ended detected via status.ended');
                 return 'ended';
+              }
+              if (status && status.removed) {
+                (window as any).logBot(`🚨 Webex bot removed from meeting: ${status.removalReason}`);
+                return 'removed';
               }
               return null;
             } catch {
