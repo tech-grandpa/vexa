@@ -235,9 +235,13 @@ async def start_bot_container(
     logger.info(f"Passing WHISPER_LIVE_URL to bot: {whisper_live_url_for_bot}")
 
     # These are the environment variables passed to the Node.js process  of the vexa-bot started by your entrypoint.sh.
+    # Transcript room URL for live viewer links
+    transcript_room_url = os.getenv('TRANSCRIPT_ROOM_URL', 'http://transcript-room:8790')
+
     environment = [
         f"BOT_CONFIG={bot_config_json}",
         f"WHISPER_LIVE_URL={whisper_live_url_for_bot}", # Use the URL from bot-manager's env
+        f"TRANSCRIPT_ROOM_URL={transcript_room_url}",
         f"LOG_LEVEL={os.getenv('LOG_LEVEL', 'INFO').upper()}",
     ]
 

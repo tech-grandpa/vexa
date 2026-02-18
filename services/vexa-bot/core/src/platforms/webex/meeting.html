@@ -171,6 +171,12 @@
             window.__WEBEX_STATUS.joined = true;
             log('Meeting state indicates admission — joined=true');
           }
+          
+          // Detect meeting end via state change (meeting:ended may not always fire)
+          if (current === 'INACTIVE' || current === 'TERMINATING' || current === 'ENDED' || current === 'LEFT') {
+            log('Meeting state indicates end — setting ended=true');
+            window.__WEBEX_STATUS.ended = true;
+          }
         });
         
         // Lobby detection: SDK fires meeting:self:lobbyWaiting when placed in lobby
