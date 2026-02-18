@@ -107,6 +107,13 @@
         window.__WEBEX_STATUS.meetingCreated = true;
         log('Meeting created', { meetingId: meeting.id });
         
+        // Log ALL events from the meeting object to discover admission signals
+        const originalEmit = meeting.emit.bind(meeting);
+        meeting.emit = function(event, ...args) {
+          log('EVENT: ' + event, args.length > 0 ? JSON.stringify(args[0]).substring(0, 200) : '');
+          return originalEmit(event, ...args);
+        };
+
         // Bind event handlers
         meeting.on('media:ready', (media) => {
           log('Media ready', { type: media.type });
